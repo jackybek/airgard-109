@@ -1,5 +1,8 @@
-#include "open62541.h"
+//#include "open62541.h"
 //#include <xml.h>
+#include <open62541/plugin/log_stdout.h>
+#include <open62541/server.h>
+#include <open62541/server_config_default.h>
 #include <libxml2/libxml/parser.h>
 #include <libxml2/libxml/tree.h>
 #include <libxml2/libxml/xmlreader.h>
@@ -832,8 +835,8 @@ UA_StatusCode GetArrayOfAlarmMethodCallback(UA_Server *server,
     int retval = 0;
 
     retval = UA_Variant_setScalarCopy(output, &arrayOfAlarm, &UA_TYPES[UA_TYPES_VARIANT]);      // global variable
-    printf("retval from setScalarCopy : %d \n", retval);
-    sleep(3);
+    //printf("retval from setScalarCopy : %d \n", retval);
+    //sleep(3);
 
     return UA_STATUSCODE_GOOD;
 
@@ -866,7 +869,7 @@ UA_StatusCode GetArrayOfNonAlarmMethodCallback(UA_Server *server,
     int retval = 0;
 
     retval = UA_Variant_setScalarCopy(output, &arrayOfNonAlarm, &UA_TYPES[UA_TYPES_VARIANT]);      // global variable
-    printf("retval from setScalarCopy : %d \n", retval);
+    //printf("retval from setScalarCopy : %d \n", retval);
 
     return UA_STATUSCODE_GOOD;
 
@@ -892,7 +895,7 @@ UA_StatusCode ClearAlarmLEDMethodCallback(UA_Server *server,
 
 	sprintf(cmdbuffer,"<Command name=\"ClearAlarmLED\" />"); // no effect : <Command name="Shutdown" />
 	cmdbuffer[32] = '\0';
-	printf("command_sockfd: %d, Command to be executed is : %s \n\n", command_sockfd, cmdbuffer);
+	//printf("command_sockfd: %d, Command to be executed is : %s \n\n", command_sockfd, cmdbuffer);
 
 	retval = write(command_sockfd, cmdbuffer, strlen(cmdbuffer)); //sizeof(cmdbuffer));
 	if (retval == -1)
@@ -902,7 +905,7 @@ UA_StatusCode ClearAlarmLEDMethodCallback(UA_Server *server,
         }
 	else
 	{
-		printf("==================write outcome is %d \n", retval);
+		//printf("==================write outcome is %d \n", retval);
 		//sleep(3);
 		// check the return value immediately
 		//if ((numbytes=recv(command_sockfd, respbuffer, MAX_BUFFER_SIZE, 0)) == -1)
@@ -2216,9 +2219,9 @@ void addGetArrayOfAlarmMethod(UA_Server *server, UA_NodeId parent)
                             UA_QUALIFIEDNAME(namespaceIndex, "GetArrayOfAlarm"),
                             getArrayOfAlarmAttr, &GetArrayOfAlarmMethodCallback,
                             0, NULL, 1, &outputArgument, NULL, NULL);
-    printf("retval from UA_Server_addMethodNode - GetArrayOfAlarm : %d \n", retval);
-//    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
-//                "Method Node created : Airgard->Methods->GetArrayOfAlarms Node");
+    //printf("retval from UA_Server_addMethodNode - GetArrayOfAlarm : %d \n", retval);
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+                "Method Node created : Airgard->Methods->GetArrayOfAlarms Node");
 }
 
 void addGetNoOfNonAlarmsMethod(UA_Server *server, UA_NodeId parent)
@@ -2277,9 +2280,9 @@ void addGetArrayOfNonAlarmMethod(UA_Server *server, UA_NodeId parent)
                             getArrayOfAlarmAttr, &GetArrayOfNonAlarmMethodCallback,
                             0, NULL, 1, &outputArgument, NULL, NULL);
 
-printf("retval from UA_Server_addMethodNode - GetArrayOfNonAlarm : %d \n", retval);
-//    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
-//                "Method Node created : Airgard->Methods->GetArrayOfNonAlarms Node");
+	//printf("retval from UA_Server_addMethodNode - GetArrayOfNonAlarm : %d \n", retval);
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+                "Method Node created : Airgard->Methods->GetArrayOfNonAlarms Node");
 
 }
 
@@ -2309,7 +2312,7 @@ void addClearAlarmLEDMethod(UA_Server *server, UA_NodeId parent)
                             0, NULL, 1, &outputArgument, NULL, NULL);
 
     UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
-                "Method Node created : Airgard->Methods->ClearAlarmLED Node\n");
+                "Method Node created : Airgard->Methods->ClearAlarmLED Node");
 
 }
 
