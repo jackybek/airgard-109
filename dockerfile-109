@@ -1,0 +1,129 @@
+# sudo docker build -f dockerfile-109 -t opcuaserver109 --tag 'open62541' . --no-cache
+
+# need to run the container and enter it to perform the Make
+# 1. run the container in shell
+# sudo docker run -it -d --name opcuaserver33 opcserver-33 bash
+# 2. enter the container
+# sudo docker exec -it opcuaserver109 /bin/bash
+# 3. install packages 
+# apt-get install nano  - no need
+
+# sudo docker stop opcuaserver109
+# sudo docker rm opcuaserver109
+
+FROM debian:latest
+LABEL maintainer=“jacky81100@yahoo.com”
+#su -
+#RUN apt-get -y install sudo
+RUN apt-get -y update
+RUN apt-get -y upgrade
+RUN apt-get -y install git build-essential gcc pkg-config cmake python-is-python3
+WORKDIR /home/debian/
+RUN git clone --branch v1.4.0-rc1  https://github.com/open62541/open62541.git
+WORKDIR /home/debian/open62541/
+RUN mkdir build
+WORKDIR /home/debian/open62541/
+RUN git submodule update --init --recursive
+RUN apt-get -y install cmake-curses-gui
+RUN apt-get -y install libmbedtls-dev
+RUN apt-get -y install check
+#RUN apt-get -y install python-sphinx-graphviz
+#RUN apt-get -y install python-sphinx-rtd-theme
+RUN apt-get -y install openssl
+RUN apt-get -y install libwebsockets-dev
+RUN apt-get -y install libjson-c-dev
+RUN apt-get -y install libxml2-dev
+RUN apt-get -y install mariadb-server 
+RUN apt-get -y install mariadb-client
+RUN apt-get -y install libmariadb3 
+RUN apt-get -y install libmariadb-dev
+RUN apt-get -y install mosquitto-clients
+RUN apt-get -y install net-tools
+RUN apt-get -y install nano
+RUN apt-get -y install proftpd
+RUN export open62541_NODESET_DIR=“/home/debian/open62541/deps/ua_nodeset/schema
+WORKDIR /home/debian/open62541/build
+RUN cmake \
+-G"Unix Makefiles" \
+-DBUILD_SHARED_LIBS=OFF \
+-DUA_AMALGAMATION_MULTIARCH=OFF \
+-DUA_ARCHITECTURE=posix \
+-DUA_BUILD_EXAMPLES=OFF \
+-DUA_BUILD_FUZZING=OFF \
+-DUA_BUILD_FUZZING_CORPUS=OFF \
+-DUA_BUILD_OSS_FUZZ=OFF \
+-DUA_BUILD_TOOLS=OFF \
+-DUA_BUILD_UNIT_TESTS=OFF \
+-DUA_DEBUG=ON \
+-DUA_DEBUG_DUMP_PKGS=OFF \
+-DUA_DEBUG_FILE_LINE_INFO=ON \
+-DUA_ENABLE_AMALGAMATION=OFF \
+-DUA_ENABLE_CLANG_COV=OFF \
+-DUA_ENABLE_COVERAGE=OFF \
+-DUA_ENABLE_DA=ON \
+-DUA_ENABLE_DEBUG_SANITIZER=ON \
+-DUA_ENABLE_DETERMINISTIC_RNG=OFF \
+-DUA_ENABLE_DIAGNOSTICS=ON \
+-DUA_ENABLE_DISCOVERY=ON \
+-DUA_ENABLE_DISCOVERY_MULTICAST=ON \
+-DUA_ENABLE_DISCOVERY_SEMAPHORE=ON \
+-DUA_ENABLE_ENCRYPTION=OPENSSL \
+-DUA_ENABLE_ENCRYPTION_MBEDTLS=OFF \
+-DUA_ENABLE_ENCRYPTION_OPENSSL=OFF \
+-DUA_ENABLE_ENCRYPTION_TPM2=OFF \
+-DUA_ENABLE_EXPERIMENTAL_HISTORIZING=OFF \
+-DUA_ENABLE_HARDENING=ON \
+-DUA_ENABLE_HISTORIZING=ON \
+-DUA_ENABLE_IMMUTABLE_NODES=ON \
+-DUA_ENABLE_INLINABLE_EXPORT=OFF \
+-DUA_ENABLE_JSON_ENCODING=ON \
+-DUA_ENABLE_MALLOC_SINGLETON=OFF \
+-DUA_ENABLE_METHODCALLS=ON \
+-DUA_ENABLE_MQTT_TLS=ON \
+-DUA_ENABLE_MQTT_TLS_OPENSSL=ON\
+-DUA_ENABLE_NODEMANAGEMENT=ON \
+-DUA_ENABLE_NODESETLOADER=OFF \
+-DUA_ENABLE_NODESET_COMPILER_DESCRIPTIONS=ON \
+-DUA_ENABLE_PARSING=ON \
+-DUA_ENABLE_PUBSUB=ON \
+-DUA_ENABLE_PUBSUB_BUFMALLOC=OFF \
+-DUA_ENABLE_PUBSUB_DELTAFRAMES=ON \
+-DUA_ENABLE_PUBSUB_ENCRYPTION=ON \
+-DUA_EANBLE_PUBSUB_ETH_UADP=ON \
+-DUA_ENABLE_PUBSUB_FILE_CONFIG=ON \
+-DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
+-DUA_ENABLE_PUBSUB_INFORMATIONMODEL_METHODS=ON \
+-DUA_ENABLE_PUBSUB_MONITORING=ON \
+-DUA_ENABLE_PUBSUB_MQTT=ON \
+-DUA_ENABLE_PUBSUB_SKS=OFF \
+-DUA_ENABLE_QUERY=OFF \
+-DUA_ENABLE_STATIC_ANALYZER=OFF \
+-DUA_ENABLE_STATUSCODE_DESCRIPTIONS=ON \
+-DUA_ENABLE_SUBSCRIPTIONS=ON \
+-DUA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS=ON \
+-DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
+-DUA_ENABLE_TYPEDESCRIPTION=ON \
+-DUA_ENABLE_UNIT_TESTS_MEMCHECK=OFF \
+-DUA_ENABLE_UNIT_TEST_FAILURE_HOOKS=OFF \
+-DUA_ENABLE_VALGRIND_INTERACTIVE=OFF \
+-DUA_ENABLE_WEBSOCKET_SERVER=ON \
+-DUA_ENABLE_XML_ENCODING=OFF \
+-DUA_FILE_NS0=OFF \
+-DUA_FILE_NS0_BLACKLIST=OFF \
+-DUA_FORCE_32BIT=OFF \
+-DUA_FORCE_CPP=OFF \
+-DUA_FORCE_WERROR=OFF \
+-DUA_LOGLEVEL=300 \
+-DUA_MSCV_FORCE_STATIC_CRT=OFF \
+-DUA_ENABLE_MULTITHREADING=100 \
+-DUA_NAMESPACE_ZERO=FULL \
+-DUA_PACK_DEBIAN=OFF ..
+
+WORKDIR /home/debian/open62541/build/
+RUN make
+WORKDIR /home/debian/opcproject/
+RUN git clone --branch main https://jackybek:ILoveSnoopyOscar24@github.com/jackybek/airgardServer-109.git
+
+VOLUME /data
+
+EXPOSE 4840
