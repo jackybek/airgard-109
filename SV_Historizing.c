@@ -1,7 +1,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "open62541.h"
+#include <time.h>
+//#include "open62541.h"
+#include <open62541/plugin/historydata/history_data_backend_memory.h>
+#include <open62541/plugin/historydata/history_data_gathering_default.h>
+#include <open62541/plugin/historydata/history_database_default.h>
+#include <open62541/plugin/historydatabase.h>
+#include <open62541/plugin/log_stdout.h>
+#include <open62541/server.h>
+#include <open62541/server_config_default.h>
+
 //#include <xml.h>
 #include <libxml2/libxml/parser.h>
 #include <libxml2/libxml/tree.h>
@@ -11,7 +20,7 @@
 //#include "myNewServer.h"
 //#include "myNewMethod.h"
 #define MAX_STRING_SIZE 64
-#define DEBUG_MODE
+//#define DEBUG_MODE
 #define UA_ENABLE_HISTORIZING
 #define optionPoll
 
@@ -174,7 +183,7 @@ void GetHistoryDBConnection()
                                            const char *unix_socket,
                                            unsigned long clientflag);
                         */
-                        if (mysql_real_connect(conn, "mysql2",
+                        if (mysql_real_connect(conn, "mysql1",
                                                 "debian",
                                                 "molekhaven24",
                                                 "HistoryAirgard",
@@ -642,7 +651,7 @@ void numDataPointsInRange(MYSQL *conn, const UA_NodeId *nodeId)
         switch (nodeId->identifier.numeric)
         {
                 case 10301:
-                        sprintf(sqlbuffer, "select count(*) from HistoryAirgardIgramPP where t1 >= '??' AND t1 <= '??' and nodeid = %d order by t1 asc ",
+                        sprintf(sqlbuffer, "select count(*) from HistoryAirgardIgramPP where t1 >= '\?\?' AND t1 <= '\?\?' and nodeid = %d order by t1 asc ",
                                         nodeId->identifier.numeric);
                         printf("numDataPointsInRange SQL :%s \n", sqlbuffer);break;
                 case 10302:
@@ -874,7 +883,7 @@ void CreateServerHistorizingItems(UA_Server *server)
 */
 
 	#ifdef optionPoll       // polling mode
-
+	UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "SV_Historizing.c : optionPoll");
                        	size_t initialNodeIdStoreSize = 22;
 			UA_StatusCode retval;
 
@@ -909,7 +918,9 @@ void CreateServerHistorizingItems(UA_Server *server)
                         HistorizingSetting.historizingUpdateStrategy = UA_HISTORIZINGUPDATESTRATEGY_POLL;
 
 	       retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outIgramPP_Id, HistorizingSetting);
+			#ifdef DEBUG
 			UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "SV_Historizing.c : registerNodeId outIgramPP_Id : %s", UA_StatusCode_name(retval));
+			#endif
 
 			HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outIgramDC_Id, HistorizingSetting);
                         HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outLaserPP_Id, HistorizingSetting);
@@ -937,8 +948,10 @@ void CreateServerHistorizingItems(UA_Server *server)
                         //HistoryDataGathering.setValue(server, HistoryDataGathering.context, config->sessionId,
                         //                                        config->sessionContext, &outIgramPP_Id, UA_TRUE, &outIgramPP_Id.value);
 
+		//IgramPP = rand(); for testing purposes
+
                 retval = HistoryDataGathering.startPoll(server, HistoryDataGathering.context, &outIgramPP_Id);
-			UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "SV_Historizing.c : startpoll outIgramPP_Id : %s", UA_StatusCode_name(retval));
+		//	UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "SV_Historizing.c : startpoll outIgramPP_Id : %s", UA_StatusCode_name(retval));
 		retval = HistoryDataGathering.startPoll(server, HistoryDataGathering.context, &outIgramDC_Id);
                 //        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "SV_Historizing.c : startpoll outIgramDC_Id : %s", UA_StatusCode_name(retval));
                 retval = HistoryDataGathering.startPoll(server, HistoryDataGathering.context, &outLaserPP_Id);
@@ -984,6 +997,7 @@ void CreateServerHistorizingItems(UA_Server *server)
 
 
 	#else // optionValueset
+	UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "SV_Historizing.c : optionValueset");
        		size_t initialNodeIdStoreSize = 1;
                 UA_StatusCode retval;
 
@@ -1017,7 +1031,7 @@ void CreateServerHistorizingItems(UA_Server *server)
 			*/
 
 		retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outIgramPP_Id, HistorizingSetting);
-                        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "SV_Historizing.c : registerNodeId outIgramPP_Id : %s", UA_StatusCode_name(retval));
+                //        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "SV_Historizing.c : registerNodeId outIgramPP_Id : %s", UA_StatusCode_name(retval));
 		retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outIgramDC_Id, HistorizingSetting);
                 //        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "SV_Historizing.c : registerNodeId outIgramDC_Id : %s", UA_StatusCode_name(retval));
                	retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outLaserPP_Id, HistorizingSetting);
@@ -1068,5 +1082,3 @@ void CreateServerHistorizingItems(UA_Server *server)
 
 
 }
-
-
