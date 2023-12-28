@@ -1,0 +1,1757 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ *
+ * @author Waheed Ejaz (IMD, University of Rostock)
+ */
+
+
+#include "ua_amqp_adaptor.h"
+#include "open62541.h"
+//#include <open62541/util.h>
+//#include <open62541/plugin/pubsub.h>
+#include <open62541/plugin/log_stdout.h>
+//#include <open62541/network_tcp.h>
+//#include <open62541/util.h>
+#include <proton/connection.h>
+#include <proton/delivery.h>
+#include <proton/link.h>
+#include <proton/message.h>
+#include <proton/session.h>
+#include <proton/event.h>
+
+
+
+/* EXTRA DETAILS */
+ssize_t __amqp_pack_uint16(uint8_t *buf, uint16_t integer)
+{
+  uint16_t integer_htons = AMQP_PAL_HTONS(integer);
+  memcpy(buf, &integer_htons, 2);
+  return 2;
+}
+
+uint16_t __amqp_unpack_uint16(const uint8_t *buf)
+{
+  uint16_t integer_htons;
+  memcpy(&integer_htons, buf, 2);
+  return AMQP_PAL_NTOHS(integer_htons);
+}
+
+ssize_t __amqp_pack_str(uint8_t *buf, const char* str) {
+    uint16_t length = (uint16_t)strlen(str);
+     /* pack string length */
+    buf += __amqp_pack_uint16(buf, length);
+
+    /* pack string */
+    for(int i = 0; i < length; ++i) {
+        *(buf++) = (uint8_t)str[i];
+    }
+
+    /* return number of bytes consumed */
+    return length + 2;
+}
+
+static const char *AMQP_ERRORS_STR[] = {
+    "AMQP_UNKNOWN_ERROR",
+    __ALL_MQTT_ERRORS(GENERATE_STRING)
+};
+
+const char* amqp_error_str(enum AMQPErrors error) {
+    int offset = error - AMQP_ERROR_UNKNOWN;
+    if (offset >= 0) {
+        return AMQP_ERRORS_STR[offset];
+    } else if (error == 0) {
+        return "AMQP_ERROR: Buffer too small.";
+    } else if (error > 0) {
+        return "AMQP_OK";
+    } else {
+        return AMQP_ERRORS_STR[0];
+    }
+}
+
+/* FIXED HEADER */
+
+#define AMQP_BITFIELD_RULE_VIOLOATION(bitfield, rule_value, rule_mask) ((bitfield ^ rule_value) & rule_mask)
+
+struct amqp_fixed_header_rules_s{
+    const uint8_t control_type_is_valid[16];
+    const uint8_t required_flags[16];
+    const uint8_t mask_required_flags[16];
+} ;
+
+
+struct amqp_fixed_header_rules_s amqp_fixed_header_rules =
+{
+    {   /* boolean value, true if type is valid */
+        0x00, /* AMQP_CONTROL_RESERVED */
+        0x01, /* AMQP_CONTROL_CONNECT */
+        0x01, /* AMQP_CONTROL_CONNACK */
+        0x01, /* AMQP_CONTROL_PUBLISH */
+        0x01, /* AMQP_CONTROL_PUBACK */
+        0x01, /* AMQP_CONTROL_PUBREC */
+        0x01, /* AMQP_CONTROL_PUBREL */
+        0x01, /* AMQP_CONTROL_PUBCOMP */
+        0x01, /* AMQP_CONTROL_SUBSCRIBE */
+        0x01, /* AMQP_CONTROL_SUBACK */
+        0x01, /* AMQP_CONTROL_UNSUBSCRIBE */
+        0x01, /* AMQP_CONTROL_UNSUBACK */
+        0x01, /* AMQP_CONTROL_PINGREQ */
+        0x01, /* AMQP_CONTROL_PINGRESP */
+        0x01, /* AMQP_CONTROL_DISCONNECT */
+        0x00  /* AMQP_CONTROL_RESERVED */
+    },
+    {   /* flags that must be set for the associated control type */
+        0x00, /* AMQP_CONTROL_RESERVED */
+        0x00, /* AMQP_CONTROL_CONNECT */
+        0x00, /* AMQP_CONTROL_CONNACK */
+        0x00, /* AMQP_CONTROL_PUBLISH */
+        0x00, /* AMQP_CONTROL_PUBACK */
+        0x00, /* AMQP_CONTROL_PUBREC */
+        0x02, /* AMQP_CONTROL_PUBREL */
+        0x00, /* AMQP_CONTROL_PUBCOMP */
+        0x02, /* AMQP_CONTROL_SUBSCRIBE */
+        0x00, /* AMQP_CONTROL_SUBACK */
+        0x02, /* AMQP_CONTROL_UNSUBSCRIBE */
+        0x00, /* AMQP_CONTROL_UNSUBACK */
+        0x00, /* AMQP_CONTROL_PINGREQ */
+        0x00, /* AMQP_CONTROL_PINGRESP */
+        0x00, /* AMQP_CONTROL_DISCONNECT */
+        0x00  /* AMQP_CONTROL_RESERVED */
+    },
+    {   /* mask of flags that must be specific values for the associated control type*/
+        0x00, /* AMQP_CONTROL_RESERVED */
+        0x0F, /* AMQP_CONTROL_CONNECT */
+        0x0F, /* AMQP_CONTROL_CONNACK */
+        0x00, /* AMQP_CONTROL_PUBLISH */
+        0x0F, /* AMQP_CONTROL_PUBACK */
+        0x0F, /* AMQP_CONTROL_PUBREC */
+        0x0F, /* AMQP_CONTROL_PUBREL */
+        0x0F, /* AMQP_CONTROL_PUBCOMP */
+        0x0F, /* AMQP_CONTROL_SUBSCRIBE */
+        0x0F, /* AMQP_CONTROL_SUBACK */
+        0x0F, /* AMQP_CONTROL_UNSUBSCRIBE */
+        0x0F, /* AMQP_CONTROL_UNSUBACK */
+        0x0F, /* AMQP_CONTROL_PINGREQ */
+        0x0F, /* AMQP_CONTROL_PINGRESP */
+        0x0F, /* AMQP_CONTROL_DISCONNECT */
+        0x00  /* AMQP_CONTROL_RESERVED */
+    }
+};
+
+static ssize_t amqp_fixed_header_rule_violation(const struct amqp_fixed_header *fixed_header) {
+    uint8_t control_type;
+    uint8_t control_flags;
+    uint8_t required_flags;
+    uint8_t mask_required_flags;
+
+    /* get value and rules */
+    control_type = (uint8_t)fixed_header->control_type;
+    control_flags = fixed_header->control_flags;
+    required_flags = amqp_fixed_header_rules.required_flags[control_type];
+    mask_required_flags = amqp_fixed_header_rules.mask_required_flags[control_type];
+
+    /* check for valid type */
+    if (!amqp_fixed_header_rules.control_type_is_valid[control_type]) {
+        return AMQP_ERROR_CONTROL_FORBIDDEN_TYPE;
+    }
+
+    /* check that flags are appropriate */
+    if(AMQP_BITFIELD_RULE_VIOLOATION(control_flags, required_flags, mask_required_flags)) {
+        return AMQP_ERROR_CONTROL_INVALID_FLAGS;
+    }
+
+    return 0;
+}
+
+
+ssize_t amqp_unpack_fixed_header(struct amqp_response *response, const uint8_t *buf, size_t bufsz) {
+    struct amqp_fixed_header *fixed_header;
+    const uint8_t *start = buf;
+    int lshift;
+    ssize_t errcode;
+
+    /* check for null pointers or empty buffer */
+    if (response == NULL || buf == NULL) {
+        return MQTT_ERROR_NULLPTR;
+    }
+    fixed_header = &(response->fixed_header);
+
+    /* check that bufsz is not zero */
+    if (bufsz == 0) return 0;
+
+    /* parse control type and flags */
+    fixed_header->control_type  = (enum AMQPControlPacketType)(*buf >> 4);
+    fixed_header->control_flags = (uint8_t)(*buf & 0x0F);
+
+    /* parse remaining size */
+    fixed_header->remaining_length = 0;
+
+    lshift = 0;
+    do {
+
+        /* MQTT spec (2.2.3) says the maximum length is 28 bits */
+        if(lshift == 28)
+            return AMQP_ERROR_INVALID_REMAINING_LENGTH;
+
+        /* consume byte and assert at least 1 byte left */
+        --bufsz;
+        ++buf;
+        if (bufsz == 0) return 0;
+
+        /* parse next byte*/
+        fixed_header->remaining_length += (uint32_t)((*buf & 0x7F) << lshift);
+        lshift += 7;
+    } while(*buf & 0x80); /* while continue bit is set */
+
+    /* consume last byte */
+    --bufsz;
+    ++buf;
+
+    /* check that the fixed header is valid */
+    errcode = amqp_fixed_header_rule_violation(fixed_header);
+    if (errcode) {
+        return errcode;
+    }
+
+    /* check that the buffer size if GT remaining length */
+    if (bufsz < fixed_header->remaining_length) {
+        return 0;
+    }
+
+    /* return how many bytes were consumed */
+    return buf - start;
+}
+
+ssize_t amqp_pack_fixed_header(uint8_t *buf, size_t bufsz, const struct amqp_fixed_header *fixed_header) {
+    const uint8_t *start = buf;
+    ssize_t errcode;
+    uint32_t remaining_length;
+
+    /* check for null pointers or empty buffer */
+    if (fixed_header == NULL || buf == NULL) {
+        return AMQP_ERROR_NULLPTR;
+    }
+
+    /* check that the fixed header is valid */
+    errcode = amqp_fixed_header_rule_violation(fixed_header);
+    if (errcode) {
+        return errcode;
+    }
+
+    /* check that bufsz is not zero */
+    if (bufsz == 0) return 0;
+
+    /* pack control type and flags */
+    *buf =  (uint8_t)((((uint8_t) fixed_header->control_type) << 4) & 0xF0);
+    *buf = (uint8_t)(*buf | (((uint8_t) fixed_header->control_flags)       & 0x0F));
+
+    remaining_length = fixed_header->remaining_length;
+
+    /* MQTT spec (2.2.3) says maximum remaining length is 2^28-1 */
+    if(remaining_length >= 256*1024*1024)
+        return AMQP_ERROR_INVALID_REMAINING_LENGTH;
+
+    do {
+        /* consume byte and assert at least 1 byte left */
+        --bufsz;
+        ++buf;
+        if (bufsz == 0) return 0;
+
+        /* pack next byte */
+        *buf  = remaining_length & 0x7F;
+        if(remaining_length > 127) *buf |= 0x80;
+        remaining_length = remaining_length >> 7;
+    } while(*buf & 0x80);
+    /* consume last byte */
+    --bufsz;
+    ++buf;
+
+    /* check that there's still enough space in buffer for packet */
+    if (bufsz < fixed_header->remaining_length) {
+        return 0;
+    }
+
+    /* return how many bytes were consumed */
+    return buf - start;
+}
+
+
+
+/* CONNECT */
+ssize_t amqp_pack_connection_request(uint8_t* buf, size_t bufsz,
+                                     const char* client_id,
+                                     const char* will_topic,
+                                     const void* will_message,
+                                     size_t will_message_size,
+                                     const char* user_name,
+                                     const char* password,
+                                     uint8_t connect_flags,
+                                     uint16_t keep_alive)
+{
+    struct amqp_fixed_header fixed_header;
+    size_t remaining_length;
+    const uint8_t *const start = buf;
+    ssize_t rv;
+
+    /* pack the fixed headr */
+    fixed_header.control_type = AMQP_CONTROL_CONNECT;
+    fixed_header.control_flags = 0x00;
+
+    /* calculate remaining length and build connect_flags at the same time */
+    connect_flags = (uint8_t)(connect_flags & ~AMQP_CONNECT_RESERVED);
+    remaining_length = 10; /* size of variable header */
+
+    if (client_id == NULL) {
+        client_id = "";
+    }
+    /* For an empty client_id, a clean session is required */
+    if (client_id[0] == '\0' && !(connect_flags & AMQP_CONNECT_CLEAN_SESSION)) {
+        return AMQP_ERROR_CLEAN_SESSION_IS_REQUIRED;
+    }
+    /* mqtt_string length is strlen + 2 */
+    remaining_length += __amqp_packed_cstrlen(client_id);
+
+    if (will_topic != NULL) {
+        uint8_t temp;
+        /* there is a will */
+        connect_flags |= AMQP_CONNECT_WILL_FLAG;
+        remaining_length += __amqp_packed_cstrlen(will_topic);
+
+        if (will_message == NULL) {
+            /* if there's a will there MUST be a will message */
+            return AMQP_ERROR_CONNECT_NULL_WILL_MESSAGE;
+        }
+        remaining_length += 2 + will_message_size; /* size of will_message */
+
+        /* assert that the will QOS is valid (i.e. not 3) */
+        temp = connect_flags & 0x18; /* mask to QOS */
+        if (temp == 0x18) {
+            /* bitwise equality with QoS 3 (invalid)*/
+            return AMQP_ERROR_CONNECT_FORBIDDEN_WILL_QOS;
+        }
+    } else {
+        /* there is no will so set all will flags to zero */
+        connect_flags &= (uint8_t)~AMQP_CONNECT_WILL_FLAG;
+        connect_flags &= (uint8_t)~0x18;
+        connect_flags &= (uint8_t)~AMQP_CONNECT_WILL_RETAIN;
+    }
+
+    if (user_name != NULL) {
+        /* a user name is present */
+        connect_flags |= AMQP_CONNECT_USER_NAME;
+        remaining_length += (uint32_t)__amqp_packed_cstrlen(user_name);
+    } else {
+        connect_flags &= (uint8_t)~AMQP_CONNECT_USER_NAME;
+    }
+
+    if (password != NULL) {
+        /* a password is present */
+        connect_flags |= AMQP_CONNECT_PASSWORD;
+        remaining_length += (uint32_t)__amqp_packed_cstrlen(password);
+    } else {
+        connect_flags &= (uint8_t)~AMQP_CONNECT_PASSWORD;
+    }
+
+    /* fixed header length is now calculated*/
+    fixed_header.remaining_length = (uint32_t)remaining_length;
+
+    /* pack fixed header and perform error checks */
+    rv = amqp_pack_fixed_header(buf, bufsz, &fixed_header);
+    if (rv <= 0) {
+        /* something went wrong */
+        return rv;
+    }
+    buf += rv;
+    bufsz -= (size_t)rv;
+
+    /* check that the buffer has enough space to fit the remaining length */
+    if (bufsz < fixed_header.remaining_length) {
+        return 0;
+    }
+
+    /* pack the variable header */
+    *buf++ = 0x00;
+    *buf++ = 0x04;
+    *buf++ = (uint8_t) 'M';
+    *buf++ = (uint8_t) 'Q';
+    *buf++ = (uint8_t) 'T';
+    *buf++ = (uint8_t) 'T';
+    *buf++ = AMQP_PROTOCOL_LEVEL;
+    *buf++ = connect_flags;
+    buf += __amqp_pack_uint16(buf, keep_alive);
+
+    /* pack the payload */
+    buf += __amqp_pack_str(buf, client_id);
+    if (connect_flags & MQTT_CONNECT_WILL_FLAG) {
+        buf += __amqp_pack_str(buf, will_topic);
+        buf += __amqp_pack_uint16(buf, (uint16_t)will_message_size);
+        memcpy(buf, will_message, will_message_size);
+        buf += will_message_size;
+    }
+    if (connect_flags & MQTT_CONNECT_USER_NAME) {
+        buf += __amqp_pack_str(buf, user_name);
+    }
+    if (connect_flags & MQTT_CONNECT_PASSWORD) {
+        buf += __amqp_pack_str(buf, password);
+    }
+
+    /* return the number of bytes that were consumed */
+    return buf - start;
+}
+
+
+
+
+
+
+
+
+
+
+ssize_t
+amqp_pal_sendall(amqp_pal_socket_handle fd, const void* buf, size_t len, int flags) {
+    UA_Connection *connection = (UA_Connection*) fd->connection;
+    UA_ByteString sendBuffer;
+    sendBuffer.data = (UA_Byte*)UA_malloc(len);
+    sendBuffer.length = len;
+    memcpy(sendBuffer.data, buf, len);
+    UA_StatusCode ret = connection->send(connection, &sendBuffer);
+    if(ret != UA_STATUSCODE_GOOD)
+        return -1;
+    return (ssize_t)len;
+}
+
+ssize_t
+amqp_pal_recvall(amqp_pal_socket_handle fd, void* buf, size_t bufsz, int flags) {
+    UA_Connection *connection = (UA_Connection*)fd->connection;
+    UA_ByteString inBuffer;
+    inBuffer.data = (UA_Byte*)buf;
+    inBuffer.length = bufsz;
+    UA_StatusCode ret = connection->recv(connection, &inBuffer, fd->timeout);
+    if(ret == UA_STATUSCODE_GOOD ) {
+        return (ssize_t)inBuffer.length;
+    } else if(ret == UA_STATUSCODE_GOODNONCRITICALTIMEOUT) {
+        return 0;
+    } else {
+        return -1; //error case, no free necessary
+    }
+}
+
+enum AMQPErrors amqp_sync(struct amqp_client *client) {
+    /* Recover from any errors */
+    enum AMQPErrors err;
+    AMQP_PAL_MUTEX_LOCK(&client->mutex);
+    if (client->error != AMQP_OK && client->reconnect_callback != NULL) {
+        client->reconnect_callback(client, &client->reconnect_state);
+        /* unlocked during CONNECT */
+    } else {
+        AMQP_PAL_MUTEX_UNLOCK(&client->mutex);
+    }
+
+    /* Call inspector callback if necessary */
+
+    if (client->inspector_callback != NULL) {
+        AMQP_PAL_MUTEX_LOCK(&client->mutex);
+        err = client->inspector_callback(client);
+        AMQP_PAL_MUTEX_UNLOCK(&client->mutex);
+        if (err != AMQP_OK) return err;
+    }
+
+    /* Call receive */
+    err = (enum AMQPErrors)__amqp_recv(client);
+    if (err != AMQP_OK) return err;
+
+    /* Call send */
+    err = (enum AMQPErrors)__amqp_send(client);
+    return err;
+}
+
+uint16_t __amqp_next_pid(struct amqp_client *client) {
+    int pid_exists = 0;
+    if (client->pid_lfsr == 0) {
+        client->pid_lfsr = 163u;
+    }
+    /* LFSR taps taken from: https://en.wikipedia.org/wiki/Linear-feedback_shift_register */
+
+    do {
+        struct amqp_queued_message *curr;
+        unsigned lsb = client->pid_lfsr & 1;
+        (client->pid_lfsr) >>= 1;
+        if (lsb) {
+            client->pid_lfsr ^= 0xB400u;
+        }
+
+
+        /* check that the PID is unique */
+        pid_exists = 0;
+        for(curr = amqp_mq_get(&(client->mq), 0); curr >= client->mq.queue_tail; --curr) {
+            if (curr->packet_id == client->pid_lfsr) {
+                pid_exists = 1;
+                break;
+            }
+        }
+
+    } while(pid_exists);
+    return client->pid_lfsr;
+}
+
+
+enum AMQPErrors amqp_init(struct amqp_client *client,
+               amqp_pal_socket_handle sockfd,
+               uint8_t *sendbuf, size_t sendbufsz,
+               uint8_t *recvbuf, size_t recvbufsz,
+               void (*publish_response_callback)(void** state,struct amqp_response_publish *publish))
+{
+    if (client == NULL || sendbuf == NULL || recvbuf == NULL) {
+        return AMQP_ERROR_NULLPTR;
+    }
+
+    /* initialize mutex */
+    AMQP_PAL_MUTEX_INIT(&client->mutex);
+    AMQP_PAL_MUTEX_LOCK(&client->mutex); /* unlocked during CONNECT */
+
+    client->socketfd = sockfd;
+
+    amqp_mq_init(&client->mq, sendbuf, sendbufsz);
+
+    client->recv_buffer.mem_start = recvbuf;
+    client->recv_buffer.mem_size = recvbufsz;
+    client->recv_buffer.curr = client->recv_buffer.mem_start;
+    client->recv_buffer.curr_sz = client->recv_buffer.mem_size;
+
+    client->error = AMQP_ERROR_CONNECT_NOT_CALLED;
+    client->response_timeout = 30;
+    client->number_of_timeouts = 0;
+    client->number_of_keep_alives = 0;
+    client->typical_response_time = -1.0;
+    client->publish_response_callback = publish_response_callback;
+    client->pid_lfsr = 0;
+    client->send_offset = 0;
+
+    client->inspector_callback = NULL;
+    client->reconnect_callback = NULL;
+    client->reconnect_state = NULL;
+
+    return AMQP_OK;
+}
+
+void amqp_init_reconnect(struct amqp_client *client,
+                         void (*reconnect)(struct amqp_client *, void**),
+                         void *reconnect_state,
+                         void (*publish_response_callback)(void** state, struct amqp_response_publish *publish))
+{
+    /* initialize mutex */
+    AMQP_PAL_MUTEX_INIT(&client->mutex);
+
+    client->socketfd = (amqp_pal_socket_handle) -1;
+
+    amqp_mq_init(&client->mq, NULL, 0);
+
+    client->recv_buffer.mem_start = NULL;
+    client->recv_buffer.mem_size = 0;
+    client->recv_buffer.curr = NULL;
+    client->recv_buffer.curr_sz = 0;
+
+    client->error = AMQP_ERROR_INITIAL_RECONNECT;
+    client->response_timeout = 30;
+    client->number_of_timeouts = 0;
+    client->number_of_keep_alives = 0;
+    client->typical_response_time = -1.0;
+    client->publish_response_callback = publish_response_callback;
+    client->send_offset = 0;
+
+    client->inspector_callback = NULL;
+    client->reconnect_callback = reconnect;
+    client->reconnect_state = reconnect_state;
+}
+
+void amqp_reinit(struct amqp_client* client,
+                 amqp_pal_socket_handle socketfd,
+                 uint8_t *sendbuf, size_t sendbufsz,
+                 uint8_t *recvbuf, size_t recvbufsz)
+{
+    client->error = AMQP_ERROR_CONNECT_NOT_CALLED;
+    client->socketfd = socketfd;
+
+    amqp_mq_init(&client->mq, sendbuf, sendbufsz);
+
+    client->recv_buffer.mem_start = recvbuf;
+    client->recv_buffer.mem_size = recvbufsz;
+    client->recv_buffer.curr = client->recv_buffer.mem_start;
+    client->recv_buffer.curr_sz = client->recv_buffer.mem_size;
+}
+
+/**
+ * A macro function that:
+ *      1) Checks that the client isn't in an error state.
+ *      2) Attempts to pack to client's message queue.
+ *          a) handles errors
+ *          b) if mq buffer is too small, cleans it and tries again
+ *      3) Upon successful pack, registers the new message.
+ */
+#define AMQP_CLIENT_TRY_PACK(tmp, msg, client, pack_call, release)  \
+    if (client->error < 0) {                                        \
+        if (release) AMQP_PAL_MUTEX_UNLOCK(&client->mutex);         \
+        return client->error;                                       \
+    }                                                               \
+    tmp = pack_call;                                                \
+    if (tmp < 0) {                                                  \
+        client->error = (enum AMQPErrors)tmp;                                        \
+        if (release) AMQP_PAL_MUTEX_UNLOCK(&client->mutex);         \
+        return (enum AMQPErrors)tmp;                                                 \
+    } else if (tmp == 0) {                                          \
+        amqp_mq_clean(&client->mq);                                 \
+        tmp = pack_call;                                            \
+        if (tmp < 0) {                                              \
+            client->error = (enum AMQPErrors)tmp;                                    \
+            if (release) AMQP_PAL_MUTEX_UNLOCK(&client->mutex);     \
+            return (enum AMQPErrors)tmp;                                             \
+        } else if(tmp == 0) {                                       \
+            client->error = AMQP_ERROR_SEND_BUFFER_IS_FULL;         \
+            if (release) AMQP_PAL_MUTEX_UNLOCK(&client->mutex);     \
+            return (enum AMQPErrors)AMQP_ERROR_SEND_BUFFER_IS_FULL;                  \
+        }                                                           \
+    }
+    msg = amqp_mq_register(&client->mq, (size_t)tmp);                       \
+
+
+enum AMQPErrors amqp_connect(struct amqp_client *client,
+                     const char* client_id,
+                     const char* will_topic,
+                     const void* will_message,
+                     size_t will_message_size,
+                     const char* user_name,
+                     const char* password,
+                     uint8_t connect_flags,
+                     uint16_t keep_alive)
+{
+    ssize_t rv;
+    struct amqp_queued_message *msg;
+
+    /* Note: Current thread already has mutex locked. */
+
+    /* update the client's state */
+    client->keep_alive = keep_alive;
+    if (client->error == AMQP_ERROR_CONNECT_NOT_CALLED) {
+        client->error = AMQP_OK;
+    }
+
+    /* try to pack the message */
+    AMQP_CLIENT_TRY_PACK(rv, msg, client,
+        amqp_pack_connection_request(
+            client->mq.curr, client->mq.curr_sz,
+            client_id, will_topic, will_message,
+            will_message_size,user_name, password,
+            connect_flags, keep_alive
+        ),
+        1
+    );
+    /* save the control type of the message */
+    msg->control_type = AMQP_CONTROL_CONNECT;
+
+    AMQP_PAL_MUTEX_UNLOCK(&client->mutex);
+    return AMQP_OK;
+}
+
+
+enum AMQPErrors amqp_publish(struct amqp_client *client,
+                     const char* topic_name,
+                     void* application_message,
+                     size_t application_message_size,
+                     uint8_t publish_flags)
+{
+    struct amqp_queued_message *msg;
+    ssize_t rv;
+    uint16_t packet_id;
+    AMQP_PAL_MUTEX_LOCK(&client->mutex);
+    packet_id = __amqp_next_pid(client);
+
+
+    /* try to pack the message */
+    AMQP_CLIENT_TRY_PACK(
+        rv, msg, client,
+        amqp_pack_publish_request(
+            client->mq.curr, client->mq.curr_sz,
+            topic_name,
+            packet_id,
+            application_message,
+            application_message_size,
+            publish_flags
+        ),
+        1
+    );
+    /* save the control type and packet id of the message */
+    msg->control_type = AMQP_CONTROL_PUBLISH;
+    msg->packet_id = packet_id;
+
+    AMQP_PAL_MUTEX_UNLOCK(&client->mutex);
+    return AMQP_OK;
+}
+
+/* PUBXXX */
+ssize_t amqp_pack_pubxxx_request(uint8_t *buf, size_t bufsz,
+                                 enum AMQPControlPacketType control_type,
+                                 uint16_t packet_id)
+{
+    const uint8_t *const start = buf;
+    struct amqp_fixed_header fixed_header;
+    ssize_t rv;
+    if (buf == NULL) {
+        return AMQP_ERROR_NULLPTR;
+    }
+    /* pack fixed header */
+    fixed_header.control_type = control_type;
+    if (control_type == AMQP_CONTROL_PUBREL) {
+        fixed_header.control_flags = 0x02;
+    } else {
+        fixed_header.control_flags = 0;
+    }
+    fixed_header.remaining_length = 2;
+    rv = amqp_pack_fixed_header(buf, bufsz, &fixed_header);
+    if (rv <= 0) {
+        return rv;
+    }
+    buf += rv;
+    bufsz -= (size_t)rv;
+
+    if (bufsz < fixed_header.remaining_length) {
+        return 0;
+    }
+
+    buf += __amqp_pack_uint16(buf, packet_id);
+
+    return buf - start;
+}
+
+ssize_t amqp_unpack_pubxxx_response(struct amqp_response *amqp_response, const uint8_t *buf)
+{
+    const uint8_t *const start = buf;
+    uint16_t packet_id;
+
+    /* assert remaining length is correct */
+    if (amqp_response->fixed_header.remaining_length != 2) {
+        return AMQP_ERROR_MALFORMED_RESPONSE;
+    }
+
+    /* parse packet_id */
+    packet_id = __amqp_unpack_uint16(buf);
+    buf += 2;
+
+    if (amqp_response->fixed_header.control_type == AMQP_CONTROL_PUBACK) {
+        amqp_response->decoded.puback.packet_id = packet_id;
+    } else if (amqp_response->fixed_header.control_type == AMQP_CONTROL_PUBREC) {
+        amqp_response->decoded.pubrec.packet_id = packet_id;
+    } else if (amqp_response->fixed_header.control_type == AMQP_CONTROL_PUBREL) {
+        amqp_response->decoded.pubrel.packet_id = packet_id;
+    } else {
+        amqp_response->decoded.pubcomp.packet_id = packet_id;
+    }
+
+    return buf - start;
+}
+
+/* SUBACK */
+ssize_t amqp_unpack_suback_response (struct amqp_response *amqp_response, const uint8_t *buf) {
+    const uint8_t *const start = buf;
+    uint32_t remaining_length = amqp_response->fixed_header.remaining_length;
+
+    /* assert remaining length is at least 3 (for packet id and at least 1 topic) */
+    if (remaining_length < 3) {
+        return AMQP_ERROR_MALFORMED_RESPONSE;
+    }
+
+    /* unpack packet_id */
+    amqp_response->decoded.suback.packet_id = __amqp_unpack_uint16(buf);
+    buf += 2;
+    remaining_length -= 2;
+
+    /* unpack return codes */
+    amqp_response->decoded.suback.num_return_codes = (size_t) remaining_length;
+    amqp_response->decoded.suback.return_codes = buf;
+    buf += remaining_length;
+
+    return buf - start;
+}
+
+/* SUBSCRIBE */
+ssize_t amqp_pack_subscribe_request(uint8_t *buf, size_t bufsz, unsigned int packet_id, ...) {
+    va_list args;
+    const uint8_t *const start = buf;
+    ssize_t rv;
+    struct amqp_fixed_header fixed_header;
+    unsigned int num_subs = 0;
+    unsigned int i;
+    const char *topic[AMQP_SUBSCRIBE_REQUEST_MAX_NUM_TOPICS];
+    uint8_t max_qos[AMQP_SUBSCRIBE_REQUEST_MAX_NUM_TOPICS];
+
+    /* parse all subscriptions */
+    va_start(args, packet_id);
+    while(1) {
+        topic[num_subs] = va_arg(args, const char*);
+        if (topic[num_subs] == NULL) {
+            /* end of list */
+            break;
+        }
+
+        max_qos[num_subs] = (uint8_t) va_arg(args, unsigned int);
+
+        ++num_subs;
+        if (num_subs >= AMQP_SUBSCRIBE_REQUEST_MAX_NUM_TOPICS) {
+            return AMQP_ERROR_SUBSCRIBE_TOO_MANY_TOPICS;
+        }
+    }
+    va_end(args);
+
+    /* build the fixed header */
+    fixed_header.control_type = AMQP_CONTROL_SUBSCRIBE;
+    fixed_header.control_flags = 2u;
+    fixed_header.remaining_length = 2u; /* size of variable header */
+    for(i = 0; i < num_subs; ++i) {
+        /* payload is topic name + max qos (1 byte) */
+        fixed_header.remaining_length += __amqp_packed_cstrlen(topic[i]) + 1;
+    }
+
+    /* pack the fixed header */
+    rv = amqp_pack_fixed_header(buf, bufsz, &fixed_header);
+    if (rv <= 0) {
+        return rv;
+    }
+    buf += rv;
+    bufsz -= (unsigned long)rv;
+
+    /* check that the buffer has enough space */
+    if (bufsz < fixed_header.remaining_length) {
+        return 0;
+
+    /* pack variable header */
+    buf += __amqp_pack_uint16(buf, (uint16_t)packet_id);
+
+
+    /* pack payload */
+    for(i = 0; i < num_subs; ++i) {
+        buf += __amqp_pack_str(buf, topic[i]);
+        *buf++ = max_qos[i];
+    }
+
+    return buf - start;
+}
+
+/* UNSUBACK */
+ssize_t amqp_unpack_unsuback_response(struct amqp_response *amqp_response, const uint8_t *buf)
+{
+    const uint8_t *const start = buf;
+
+    if (amqp_response->fixed_header.remaining_length != 2) {
+        return AMQP_ERROR_MALFORMED_RESPONSE;
+    }
+
+    /* parse packet_id */
+    amqp_response->decoded.unsuback.packet_id = __amqp_unpack_uint16(buf);
+    buf += 2;
+
+    return buf - start;
+}
+
+/* UNSUBSCRIBE */
+ssize_t amqp_pack_unsubscribe_request(uint8_t *buf, size_t bufsz, unsigned int packet_id, ...) {
+    va_list args;
+    const uint8_t *const start = buf;
+    ssize_t rv;
+    struct mqtt_fixed_header fixed_header;
+    unsigned int num_subs = 0;
+    unsigned int i;
+    const char *topic[AMQP_UNSUBSCRIBE_REQUEST_MAX_NUM_TOPICS];
+
+    /* parse all subscriptions */
+    va_start(args, packet_id);
+    while(1) {
+        topic[num_subs] = va_arg(args, const char*);
+        if (topic[num_subs] == NULL) {
+            /* end of list */
+            break;
+        }
+
+        ++num_subs;
+        if (num_subs >= AMQP_UNSUBSCRIBE_REQUEST_MAX_NUM_TOPICS) {
+            return AMQP_ERROR_UNSUBSCRIBE_TOO_MANY_TOPICS;
+        }
+    }
+    va_end(args);
+
+    /* build the fixed header */
+    fixed_header.control_type = AMQP_CONTROL_UNSUBSCRIBE;
+    fixed_header.control_flags = 2u;
+    fixed_header.remaining_length = 2u; /* size of variable header */
+    for(i = 0; i < num_subs; ++i) {
+        /* payload is topic name */
+        fixed_header.remaining_length += __amqp_packed_cstrlen(topic[i]);
+    }
+
+    /* pack the fixed header */
+    rv = amqp_pack_fixed_header(buf, bufsz, &fixed_header);
+    if (rv <= 0) {
+        return rv;
+    }
+    buf += rv;
+    bufsz -= (unsigned long)rv;
+
+    /* check that the buffer has enough space */
+    if (bufsz < fixed_header.remaining_length) {
+        return 0;
+    }
+
+    /* pack variable header */
+    buf += __amqp_pack_uint16(buf, (uint16_t)packet_id);
+
+    /* pack payload */
+    for(i = 0; i < num_subs; ++i) {
+        buf += __amqp_pack_str(buf, topic[i]);
+    }
+
+    return buf - start;
+}
+
+/* MESSAGE QUEUE */
+void amqp_mq_init(struct amqp_message_queue *mq, void *buf, size_t bufsz)
+{
+    mq->mem_start = buf;
+    mq->mem_end = (uint8_t *)buf + bufsz;
+    mq->curr = (uint8_t *)buf;
+    mq->queue_tail = (struct amqp_queued_message *)mq->mem_end;
+    mq->curr_sz = (size_t)(amqp_mq_currsz(mq));
+}
+
+struct amqp_queued_message* amqp_mq_register(struct amqp_message_queue *mq, size_t nbytes)
+{
+    /* make queued message header */
+    --(mq->queue_tail);
+    mq->queue_tail->start = mq->curr;
+    mq->queue_tail->size = nbytes;
+    mq->queue_tail->state = AMQP_QUEUED_UNSENT;
+
+    /* move curr and recalculate curr_sz */
+    mq->curr += nbytes;
+    mq->curr_sz = (size_t)(amqp_mq_currsz(mq));
+
+    return mq->queue_tail;
+}
+
+void amqp_mq_clean(struct amqp_message_queue *mq) {
+    struct amqp_queued_message *new_head;
+
+    for(new_head = amqp_mq_get(mq, 0); new_head >= mq->queue_tail; --new_head) {
+        if (new_head->state != AMQP_QUEUED_COMPLETE) break;
+    }
+
+    /* check if everything can be removed */
+    if (new_head < mq->queue_tail) {
+        mq->curr = (uint8_t *)mq->mem_start;
+        mq->queue_tail = (struct mqtt_queued_message *)mq->mem_end;
+        mq->curr_sz = (size_t)(mqtt_mq_currsz(mq));
+        return;
+    } else if (new_head == mqtt_mq_get(mq, 0)) {
+        /* do nothing */
+        return;
+    }
+
+    /* move buffered data */
+    {
+        size_t n = (size_t)(mq->curr - new_head->start);
+        size_t removing = (size_t)(new_head->start - (uint8_t*) mq->mem_start);
+        memmove(mq->mem_start, new_head->start, n);
+        mq->curr = (uint8_t *)((uint8_t *)mq->mem_start + n);
+
+
+        /* move queue */
+        {
+            ssize_t new_tail_idx = new_head - mq->queue_tail;
+            memmove(amqp_mq_get(mq, new_tail_idx), mq->queue_tail, sizeof(struct amqp_queued_message) * (size_t)((new_tail_idx + 1)));
+            mq->queue_tail = amqp_mq_get(mq, new_tail_idx);
+
+            {
+                /* bump back start's */
+                for(ssize_t i = 0; i < new_tail_idx + 1; ++i) {
+                    amqp_mq_get(mq, i)->start -= removing;
+                }
+            }
+        }
+    }
+
+    /* get curr_sz */
+    mq->curr_sz = (size_t)(amqp_mq_currsz(mq));
+}
+
+
+struct amqp_queued_message* amqp_mq_find(struct amqp_message_queue *mq, enum AMQPControlPacketType control_type, uint16_t *packet_id)
+{
+    struct amqp_queued_message *curr;
+    for(curr = amqp_mq_get(mq, 0); curr >= mq->queue_tail; --curr) {
+        if (curr->control_type == control_type) {
+            if ((packet_id == NULL && curr->state != AMQP_QUEUED_COMPLETE) ||
+                (packet_id != NULL && *packet_id == curr->packet_id)) {
+                return curr;
+            }
+        }
+    }
+    return NULL;
+}
+
+
+/* RESPONSE UNPACKING */
+ssize_t amqp_unpack_response(struct amqp_response* response, const uint8_t *buf, size_t bufsz) {
+    const uint8_t *const start = buf;
+    ssize_t rv = amqp_unpack_fixed_header(response, buf, bufsz);
+    if (rv <= 0) return rv;
+    else buf += rv;
+    switch(response->fixed_header.control_type) {
+        case AMQP_CONTROL_CONNACK:
+            rv = mqtt_unpack_connack_response(response, buf);
+            break;
+        case AMQP_CONTROL_PUBLISH:
+            rv = mqtt_unpack_publish_response(response, buf);
+            break;
+        case AMQP_CONTROL_PUBACK:
+            rv = mqtt_unpack_pubxxx_response(response, buf);
+            break;
+        case AMQP_CONTROL_PUBREC:
+            rv = mqtt_unpack_pubxxx_response(response, buf);
+            break;
+        case AMQP_CONTROL_PUBREL:
+            rv = mqtt_unpack_pubxxx_response(response, buf);
+            break;
+        case AMQP_CONTROL_PUBCOMP:
+            rv = mqtt_unpack_pubxxx_response(response, buf);
+            break;
+        case AMQP_CONTROL_SUBACK:
+            rv = mqtt_unpack_suback_response(response, buf);
+            break;
+        case AMQP_CONTROL_UNSUBACK:
+            rv = mqtt_unpack_unsuback_response(response, buf);
+            break;
+        case AMQP_CONTROL_PINGRESP:
+            return rv;
+        default:
+            return AMQP_ERROR_RESPONSE_INVALID_CONTROL_TYPE;
+    }
+
+    if (rv < 0) return rv;
+    buf += rv;
+    return buf - start;
+}
+
+
+ssize_t __amqp_puback(struct amqp_client *client, uint16_t packet_id) {
+    ssize_t rv;
+    struct amqp_queued_message *msg;
+
+    /* try to pack the message */
+    AMQP_CLIENT_TRY_PACK(
+        rv, msg, client,
+        amqp_pack_pubxxx_request(
+            client->mq.curr, client->mq.curr_sz,
+            AMQP_CONTROL_PUBACK,
+            packet_id
+        ),
+        0
+    );
+    /* save the control type and packet id of the message */
+    msg->control_type = AMQP_CONTROL_PUBACK;
+    msg->packet_id = packet_id;
+
+    return AMQP_OK;
+}
+
+
+ssize_t __amqp_pubrec(struct amqp_client *client, uint16_t packet_id) {
+    ssize_t rv;
+    struct amqp_queued_message *msg;
+
+    /* try to pack the message */
+    AMQP_CLIENT_TRY_PACK(
+        rv, msg, client,
+        amqp_pack_pubxxx_request(
+            client->mq.curr, client->mq.curr_sz,
+            AMQP_CONTROL_PUBREC,
+            packet_id
+        ),
+        0
+    );
+    /* save the control type and packet id of the message */
+    msg->control_type = AMQP_CONTROL_PUBREC;
+    msg->packet_id = packet_id;
+
+    return AMQP_OK;
+}
+
+
+ssize_t __amqp_pubrel(struct amqp_client *client, uint16_t packet_id) {
+    ssize_t rv;
+    struct amqp_queued_message *msg;
+
+    /* try to pack the message */
+    AMQP_CLIENT_TRY_PACK(
+        rv, msg, client,
+        amqp_pack_pubxxx_request(
+            client->mq.curr, client->mq.curr_sz,
+            AMQP_CONTROL_PUBREL,
+            packet_id
+        ),
+        0
+    );
+    /* save the control type and packet id of the message */
+    msg->control_type = AMQP_CONTROL_PUBREL;
+    msg->packet_id = packet_id;
+
+    return AMQP_OK;
+}
+
+
+ssize_t __amqp_pubcomp(struct amqp_client *client, uint16_t packet_id) {
+    ssize_t rv;
+    struct amqp_queued_message *msg;
+
+    /* try to pack the message */
+    AMQP_CLIENT_TRY_PACK(
+        rv, msg, client,
+        amqp_pack_pubxxx_request(
+            client->mq.curr, client->mq.curr_sz,
+            AMQP_CONTROL_PUBCOMP,
+            packet_id
+        ),
+        0
+    );
+    /* save the control type and packet id of the message */
+    msg->control_type = AMQP_CONTROL_PUBCOMP;
+    msg->packet_id = packet_id;
+
+    return AMQP_OK;
+}
+
+enum AMQPErrors amqp_subscribe(struct amqp_client *client,
+                       const char* topic_name,
+                       int max_qos_level)
+{
+    ssize_t rv;
+    uint16_t packet_id;
+    struct amqp_queued_message *msg;
+    AMQP_PAL_MUTEX_LOCK(&client->mutex);
+    packet_id = __amqp_next_pid(client);
+
+    /* try to pack the message */
+    AMQP_CLIENT_TRY_PACK(
+        rv, msg, client,
+        amqp_pack_subscribe_request(
+            client->mq.curr, client->mq.curr_sz,
+            packet_id,
+            topic_name,
+            max_qos_level,
+            (const char*)NULL
+        ),
+        1
+    );
+    /* save the control type and packet id of the message */
+    msg->control_type = AMQP_CONTROL_SUBSCRIBE;
+    msg->packet_id = packet_id;
+
+    AMQP_PAL_MUTEX_UNLOCK(&client->mutex);
+    return AMQP_OK;
+}
+
+enum AMQPErrors amqp_unsubscribe(struct amqp_client *client,
+                         const char* topic_name)
+{
+    uint16_t packet_id = __amqp_next_pid(client);
+    ssize_t rv;
+    struct amqp_queued_message *msg;
+    AMQP_PAL_MUTEX_LOCK(&client->mutex);
+
+    /* try to pack the message */
+    AMQP_CLIENT_TRY_PACK(
+        rv, msg, client,
+        amqp_pack_unsubscribe_request(
+            client->mq.curr, client->mq.curr_sz,
+            packet_id,
+            topic_name,
+            (const char*)NULL
+        ),
+        1
+    );
+    /* save the control type and packet id of the message */
+    msg->control_type = AMQP_CONTROL_UNSUBSCRIBE;
+    msg->packet_id = packet_id;
+
+    AMQP_PAL_MUTEX_UNLOCK(&client->mutex);
+    return AMQP_OK;
+}
+
+
+
+enum AMQPErrors amqp_ping(struct amqp_client *client) {
+    enum AMQPErrors rv;
+    AMQP_PAL_MUTEX_LOCK(&client->mutex);
+    rv = __amqp_ping(client);
+    AMQP_PAL_MUTEX_UNLOCK(&client->mutex);
+    return rv;
+}
+
+enum AMQPErrors __amqp_ping(struct amqp_client *client)
+{
+    ssize_t rv;
+    struct amqp_queued_message *msg;
+
+    /* try to pack the message */
+    AMQP_CLIENT_TRY_PACK(
+        rv, msg, client,
+        amqp_pack_ping_request(
+            client->mq.curr, client->mq.curr_sz
+        ),
+        0
+    );
+    /* save the control type and packet id of the message */
+    msg->control_type = AMQP_CONTROL_PINGREQ;
+
+
+    return AMQP_OK;
+}
+
+/**
+ *  Sends data to socket. Resets the AMQP write buffer
+ *
+ * @return UA_STATUSCODE_GOOD,
+ *         UA_STATUSCODE_BADCONNECTIONCLOSED
+ */
+static UA_StatusCode _write(UA_Connection *c, pn_connection_driver_t *d)
+{
+    pn_bytes_t bytes = pn_connection_driver_write_buffer(d);
+    UA_ByteString buffer;
+    buffer.data = (UA_Byte*)UA_malloc(bytes.size);
+    buffer.length = bytes.size;
+    memcpy(buffer.data, bytes.start, bytes.size);
+    /* send the buffer. This deletes the sendBuffer */
+    /* TODO: Send API with "const" input args. Avoid memory allocation and copying*/
+    UA_StatusCode ret = c->send(c, &buffer);
+    if (ret == UA_STATUSCODE_GOOD) {
+        /* reset the write buffer */
+        pn_connection_driver_write_done(d, bytes.size);
+    }
+
+    return ret;
+}
+
+/**
+ *  Receive data from socket. Copy to AMQP read buffer
+ *
+ * @return UA_STATUSCODE_GOOD,
+ *         UA_STATUSCODE_GOODNONCRITICALTIMEOUT,
+ *         UA_STATUSCODE_BADCONNECTIONCLOSED
+ */
+static UA_StatusCode _read(UA_Connection *c, pn_connection_driver_t *d, UA_UInt32 timeout)
+{
+    UA_ByteString inBuffer;
+
+    pn_rwbytes_t pn_read_buffer = pn_connection_driver_read_buffer(d);
+    inBuffer.data = (UA_Byte*)pn_read_buffer.start;
+    inBuffer.length = pn_read_buffer.size;
+
+    UA_StatusCode ret = c->recv(c, &inBuffer, timeout);
+
+    if(ret == UA_STATUSCODE_GOOD ) {
+        /* Process the received bytes and free recv buffer */
+        pn_connection_driver_read_done(d, inBuffer.length);
+    }
+
+    return ret;
+}
+
+/**
+ * @brief UA_AmqpDisconnect
+ * @param ctx pointer to the AMQP context
+ * @return UA_STATUSCODE
+ */
+void UA_AmqpDisconnect(UA_AmqpContext *ctx)  {
+    UA_assert(ctx);
+
+    pn_connection_close(ctx->driver->connection);
+
+    if (UA_STATUSCODE_GOOD != _write(ctx->ua_connection, ctx->driver) )  {
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "Write to socket failed when closing AMQP connection: %s",
+                     pn_error_text(pn_message_error(ctx->message)) );
+    }
+    pn_collector_free(ctx->driver->collector);
+    pn_connection_driver_close(ctx->driver);
+    pn_connection_driver_destroy(ctx->driver);
+
+    UA_free(ctx->message_buffer.start);
+    pn_message_free(ctx->message);
+}
+
+/**
+ * @brief Connects to the given address and initializes AMQP stack and evetns
+ * @param ctx   Pointer to the AMQP context
+ * @param address url to connect to
+ * @return UA_STATUCODE_GOOD, UA_STATUSCODE_BADOUTOFMEMORY, UA_STATUSCODE_BADCOMMUNICATIONERROR
+ */
+UA_StatusCode UA_AmqpConnect(UA_AmqpContext *ctx, UA_NetworkAddressUrlDataType address)  {
+    UA_assert(ctx != NULL);
+
+    /*****************************************
+     *      Initialize the AMQP stack
+     ****************************************/
+    int retVal = pn_connection_driver_init(ctx->driver, NULL, NULL);
+    if (PN_OK != retVal)  {
+        return UA_STATUSCODE_BADOUTOFMEMORY;
+    }
+
+    pn_connection_open(ctx->driver->connection);
+    ctx->openLink = true;
+    ctx->sender_link_ready = false;
+    ctx->session = pn_session(ctx->driver->connection);
+    pn_session_open(ctx->session);
+
+    /*******************************************************
+     *          UA Socket Connection
+     *******************************************************/
+    /* Config with default parameters */
+    UA_ConnectionConfig conf = {
+            0,     /* .protocolVersion */
+            1024, /* .sendBufferSize, 64k per chunk */
+            2048, /* .recvBufferSize, 64k per chunk */
+            1024,     /* .localMaxMessageSize, 0 -> unlimited */
+            1024,     /* .remoteMaxMessageSize, 0 -> unlimited */
+            1,     /* .localMaxChunkCount, 0 -> unlimited */
+            1      /* .remoteMaxChunkCount, 0 -> unlimited */
+    };
+
+#ifdef KIV
+/* added by Jacky on 29 Apr 2021 */
+// force the port to be 5672 - default AMQP port if the input is not set
+printf("ua_amp_adaptor.c : UA_AmqpConnect():: address.url is %s \n", address.url.data);
+printf("changing to opc.tcp://something.something \n");
+UA_NetworkAddressUrlDataType new_address;
+new_address.url.data = calloc(255, sizeof(char));
+new_address.url.data = "opc.tcp";
+//strcat(&new_address.url.data[7], &address.url.data[8]);
+
+for(int i=7; i<strlen(address.url.data); i++)
+{
+	printf("in loop: strlen(address.url.data) : %d, i : %d \n", strlen(address.url.data),i);
+	// new_address.url is of type UA_String
+	// new_address.url.data is of type int ptr
+	new_address.url[i] = address.url[i+1];
+}
+
+printf("new_address.url.data = %s \n", new_address.url.data);
+#endif
+
+    /* Create TCP connection: open the blocking TCP socket (connecting to the broker) */
+    UA_String myAddressUrl = UA_STRING("opc.tcp://192.168.1.22:5672");
+    UA_Connection connection = UA_ClientConnectionTCP_init( conf, myAddressUrl, 1000, NULL);
+    //UA_Connection connection = UA_ClientConnectionTCP_init( conf, address.url, 1000, NULL);
+// jacky change the following :
+    if(connection.state != UA_CONNECTIONSTATE_ESTABLISHED &&
+       connection.state != UA_CONNECTIONSTATE_OPENING){
+    //if(connection.state != UA_CONNECTIONSTATE_ESTABLISHED){
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_NETWORK,
+                     "PubSub AMQP: Connection creation failed. Tcp connection failed! : %d", connection.state);
+        return UA_STATUSCODE_BADCOMMUNICATIONERROR;
+    }
+
+//printf("UA_ClientConnectionTCP_init success \n");
+printf("before UA_socket_setnonblocking() \n");
+    /* Set socket to nonblocking!*/
+    int mystatus=0;
+    mystatus = UA_socket_set_nonblocking(connection.sockfd);
+printf("after set nonblocking socket: mystatus = %d \n", mystatus);
+    /* Copy UA_Connection */
+    memcpy(ctx->ua_connection, &connection, sizeof(UA_Connection));
+
+printf("just about to leave UA_AmqpConnect() \n");
+    return UA_STATUSCODE_GOOD;
+}
+
+/**
+ * @brief Sends a data message to queue specified by sender link
+ * @param ctx Pointer to the ctx
+ * @param sender PN_link associated with queue
+ * @param buf message data to be sent
+ * @return UA_STATUSCODE
+ */
+UA_StatusCode publishAmqp(UA_AmqpContext *ctx, UA_String queue,
+            const UA_ByteString *buf)
+{
+    pn_link_t *sender_l = ctx->links[SENDER_LINK];
+
+    if (ctx->openLink) {
+        /**
+         * Only open link for the first time after connection or reconnection
+         */
+        ctx->openLink = false;
+        ctx->sender_link_ready = false;
+        sender_l = pn_sender(ctx->session, (const char*)queue.data);
+         /* Update the linker  */
+        ctx->links[SENDER_LINK] = sender_l;
+
+        pn_terminus_set_address(pn_link_target(sender_l), (const char*)queue.data);
+        pn_link_open(sender_l);
+
+        ctx->message = pn_message();
+
+        /* yield once to let the initial messages flow and receive link creidt from the peer*/
+        UA_StatusCode ret = yieldAmqp(ctx, 5);
+
+        if (UA_STATUSCODE_GOOD == ret) {
+            if (!ctx->sender_link_ready) {
+                UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "AMQP Link: No credit received from peer");
+                return UA_STATUSCODE_BADWAITINGFORRESPONSE;
+            }
+        }
+    }
+
+    /* Check if we have credit to send messages, otherwise discard messages.
+     * AMQP lib can buffer messages if credit is not available. For now UA AMQP Adaptor
+     * doesn't support this feature
+     */
+    int credit = pn_link_credit(sender_l);
+    if (credit <= 0) {
+        ctx->sender_link_ready = false;
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "publishAmqp: AMQP link credit not availabe");
+        return UA_STATUSCODE_BADWAITINGFORRESPONSE;
+    }
+    else {
+        pn_delivery(sender_l, pn_dtag((const char *)&ctx->sequence_no,
+                                    sizeof(ctx->sequence_no)));
+
+        pn_data_t *body;
+
+        pn_message_clear(ctx->message);
+        body = pn_message_body(ctx->message);
+        /* Set the message_id also */
+        pn_data_put_int(pn_message_id(ctx->message), (int32_t)ctx->sequence_no);
+        pn_data_put_map(body);
+        pn_data_enter(body);
+        pn_data_put_string(body, pn_bytes(sizeof("sequence") - 1, "sequence"));
+        pn_data_put_int(body, (int32_t)ctx->sequence_no); /* The sequence number */
+        pn_data_exit(body);
+        ssize_t ret = pn_message_send(ctx->message, sender_l, &ctx->message_buffer);
+
+        if(ret < 0) {
+            UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "publishAmqp: Send message encoding failed: %s",
+                         pn_error_text(pn_message_error(ctx->message)) );
+
+            if (PN_OUT_OF_MEMORY == ret) {
+                return UA_STATUSCODE_BADOUTOFMEMORY;
+            } else {
+                return UA_STATUSCODE_BADINVALIDARGUMENT;
+            }
+        }
+
+        /* Immediately send data on the wire*/
+        if (UA_STATUSCODE_GOOD != _write(ctx->ua_connection, ctx->driver)) {
+            return UA_STATUSCODE_BADCONNECTIONCLOSED;
+        }
+    }
+
+    return UA_STATUSCODE_GOOD;
+
+}
+
+static void _handle_reciver_link_delivery(UA_AmqpContext *ctx, pn_delivery_t *d, pn_link_t *l)
+{
+    UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "AMQP receive not implemented");
+    (void)ctx;
+    (void)d;
+    (void)l;
+}
+
+/**
+ * Helper function to handle events
+ */
+static void __handle(UA_AmqpContext *ctx, pn_event_t *e)
+{
+    /* Note: Not all events needs to be handled.
+        Only link events are sent to wire transport*/
+    switch (pn_event_type(e)) {
+        case PN_LINK_FLOW: {
+            /* Credit received, ready to send messages */
+            ctx->sender_link_ready = true;
+        }
+        break;
+        case PN_DELIVERY: {
+            pn_link_t *l = pn_event_link(e);
+
+            if (pn_link_is_sender(l)) {
+                /* Acknowledgement received */
+                pn_delivery_t *d = pn_event_delivery(e);
+                if(pn_delivery_remote_state(d) == PN_ACCEPTED) {
+                    ctx->acknowledged_no++;
+                }
+            } else {
+                _handle_reciver_link_delivery(ctx, pn_event_delivery(e), l);
+            }
+
+        }
+        break;
+
+        default:break;
+    }
+}
+
+// added by Jacky
+
+
+
+ssize_t __amqp_send(struct amqp_client *client)
+{
+    uint8_t inspected;
+    ssize_t len;
+    int inflight_qos2 = 0;
+    int i = 0;
+
+    AMQP_PAL_MUTEX_LOCK(&client->mutex);
+
+    if (client->error < 0 && client->error != AMQP_ERROR_SEND_BUFFER_IS_FULL) {
+        AMQP_PAL_MUTEX_UNLOCK(&client->mutex);
+        return client->error;
+    }
+
+    /* loop through all messages in the queue */
+    len = amqp_mq_length(&client->mq);
+    for(; i < len; ++i) {
+        struct amqp_queued_message *msg = amqp_mq_get(&client->mq, i);
+        int resend = 0;
+        if (msg->state == AMQP_QUEUED_UNSENT) {
+            /* message has not been sent to lets send it */
+            resend = 1;
+        } else if (msg->state == AMQP_QUEUED_AWAITING_ACK) {
+            /* check for timeout */
+            if (AMQP_PAL_TIME() > msg->time_sent + client->response_timeout) {
+                resend = 1;
+                client->number_of_timeouts += 1;
+                client->send_offset = 0;
+            }
+        }
+
+        /* only send QoS 2 message if there are no inflight QoS 2 PUBLISH messages */
+        if (msg->control_type == AMQP_CONTROL_PUBLISH
+            && (msg->state == AMQP_QUEUED_UNSENT || msg->state == AMQP_QUEUED_AWAITING_ACK))
+        {
+            inspected = 0x03 & ((msg->start[0]) >> 1); /* qos */
+            if (inspected == 2) {
+                if (inflight_qos2) {
+                    resend = 0;
+                }
+                inflight_qos2 = 1;
+            }
+        }
+
+        /* goto next message if we don't need to send */
+        if (!resend) {
+            continue;
+        }
+
+        /* we're sending the message */
+        {
+          ssize_t tmp = amqp_pal_sendall(client->socketfd, msg->start + client->send_offset, msg->size - client->send_offset, 0);
+          if (tmp < 0) {
+            client->error = (enum AMQPErrors)tmp;
+            AMQP_PAL_MUTEX_UNLOCK(&client->mutex);
+            return tmp;
+          } else {
+            client->send_offset += (unsigned long)tmp;
+            if(client->send_offset < msg->size) {
+              /* partial sent. Await additional calls */
+              break;
+            } else {
+              /* whole message has been sent */
+              client->send_offset = 0;
+            }
+
+          }
+
+        }
+
+        /* update timeout watcher */
+        client->time_of_last_send = AMQP_PAL_TIME();
+        msg->time_sent = client->time_of_last_send;
+
+        /*
+        Determine the state to put the message in.
+        Control Types:
+        AMQP_CONTROL_CONNECT     -> awaiting
+        AMQP_CONTROL_CONNACK     -> n/a
+        AMQP_CONTROL_PUBLISH     -> qos == 0 ? complete : awaiting
+        AMQP_CONTROL_PUBACK      -> complete
+        AMQP_CONTROL_PUBREC      -> awaiting
+        AMQP_CONTROL_PUBREL      -> awaiting
+        AMQP_CONTROL_PUBCOMP     -> complete
+        AMQP_CONTROL_SUBSCRIBE   -> awaiting
+        AMQP_CONTROL_SUBACK      -> n/a
+        AMQP_CONTROL_UNSUBSCRIBE -> awaiting
+        AMQP_CONTROL_UNSUBACK    -> n/a
+        AMQP_CONTROL_PINGREQ     -> awaiting
+        AMQP_CONTROL_PINGRESP    -> n/a
+        AMQP_CONTROL_DISCONNECT  -> complete
+        */
+        switch (msg->control_type) {
+        case AMQP_CONTROL_PUBACK:
+        case AMQP_CONTROL_PUBCOMP:
+        case AMQP_CONTROL_DISCONNECT:
+            msg->state = AMQP_QUEUED_COMPLETE;
+            break;
+        case AMQP_CONTROL_PUBLISH:
+            inspected = ( AMQP_PUBLISH_QOS_MASK & (msg->start[0]) ) >> 1; /* qos */
+            if (inspected == 0) {
+                msg->state = AMQP_QUEUED_COMPLETE;
+            } else if (inspected == 1) {
+                msg->state = AMQP_QUEUED_AWAITING_ACK;
+                /*set DUP flag for subsequent sends [Spec MQTT-3.3.1-1] */
+                msg->start[0] |= AMQP_PUBLISH_DUP;
+            } else {
+                msg->state = AMQP_QUEUED_AWAITING_ACK;
+            }
+            break;
+        case AMQP_CONTROL_CONNECT:
+        case AMQP_CONTROL_PUBREC:
+        case AMQP_CONTROL_PUBREL:
+        case AMQP_CONTROL_SUBSCRIBE:
+        case AMQP_CONTROL_UNSUBSCRIBE:
+        case AMQP_CONTROL_PINGREQ:
+            msg->state = AMQP_QUEUED_AWAITING_ACK;
+            break;
+        default:
+            client->error = AMQP_ERROR_MALFORMED_REQUEST;
+            AMQP_PAL_MUTEX_UNLOCK(&client->mutex);
+            return AMQP_ERROR_MALFORMED_REQUEST;
+        }
+    }
+    /* check for keep-alive */
+    {
+        amqp_pal_time_t keep_alive_timeout = client->time_of_last_send + (amqp_pal_time_t)((float)(client->keep_alive) * 0.75);
+        if (AMQP_PAL_TIME() > keep_alive_timeout) {
+          ssize_t rv = __amqp_ping(client);
+          if (rv != AMQP_OK) {
+            client->error = (enum AMQPErrors)rv;
+            AMQP_PAL_MUTEX_UNLOCK(&client->mutex);
+            return rv;
+          }
+        }
+    }
+
+    AMQP_PAL_MUTEX_UNLOCK(&client->mutex);
+    return AMQP_OK;
+}
+
+/**
+ * @brief Sends out all tx buffer on the socket
+ *        Receive any incoming traffic on the socket
+ *        Handle any pending events
+ * @param ctx pointer AMQP context
+ * @param timeout timeout for listening on the socket
+ */
+UA_StatusCode yieldAmqp(UA_AmqpContext *ctx, UA_UInt16 timeout)
+{
+    UA_Connection *connection = (UA_Connection*) ctx->ua_connection;
+    UA_assert(connection != NULL);
+
+    /*
+     * Write flush
+     */
+    // added by Jacky on 26 Apr 2021
+    printf("=====================================================\n");
+    printf("In yieldAmqp function: inspecting ctx->ua_connection \n");
+    printf("ctx->ua_connection.state		: %d \n", ctx->ua_connection->state);
+    printf("*****************************************************\n");
+    printf("0 = UA_CONNECTIONSTATE_CLOSED       : The socket has been closed and the connection will be deleted \n");
+    printf("1 = UA_CONNECTIONSTATE_OPENING      : The socket is open, but the HEL/ACK handshake is not done \n");
+    printf("2 = UA_CONNECTIONSTATE_ESTABLISHED  : The socket is open and the connection configured \n");
+    printf("*****************************************************\n");
+    printf("ctx->ua_connection.channel		: %d \n", ctx->ua_connection->channel);
+    printf("ctx->ua_connection.sockfd		: %d \n", ctx->ua_connection->sockfd);
+    printf("ctx->ua_connection.openingDate	: %d \n", ctx->ua_connection->openingDate);
+    printf("ctx->ua_connection.handle		: %s \n", (char *)ctx->ua_connection->handle);
+    printf("......................................................\n");
+    printf("ctx->openLink			: %d \n", ctx->openLink);
+    printf("ctx->sender_link_ready		: %d \n", ctx->sender_link_ready);
+    printf("ctx->message			: %s \n", (char *)ctx->message);
+    printf("ctx->send_buffer (pn_rwbytes_t)	: %d \n", ctx->send_buffer);
+    printf("ctx->message_buffer (pn_rwbytes_t)  : %d \n", ctx->message_buffer);
+    printf("ctx->sequence_no			: %d \n", ctx->sequence_no);
+    printf("ctx->acknowledged_no		: %d \n", ctx->acknowledged_no);
+    printf("=====================================================\n");
+
+    // refer to open62541.c : yieldMqtt()
+    if(ctx == NULL || timeout == 0){
+        return UA_STATUSCODE_BADINVALIDARGUMENT;
+    }
+
+    //UA_Connection *connection = channelData->connection;
+    if(!connection) {
+        return UA_STATUSCODE_BADCOMMUNICATIONERROR;
+    }
+
+    if(connection->state != UA_CONNECTIONSTATE_ESTABLISHED &&
+       connection->state != UA_CONNECTIONSTATE_OPENING) {
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_NETWORK,
+                     "PubSub AMQP: yield: Tcp Connection not established!");
+        return UA_STATUSCODE_BADCOMMUNICATIONERROR;
+    }
+
+    struct amqp_client* client = (struct amqp_client*)ctx->amqpClient;
+    client->socketfd->timeout = timeout;
+
+    enum AMQPErrors error = amqp_sync(client);
+    if(error == AMQP_OK){
+        return UA_STATUSCODE_GOOD;
+    }else if(error == -1){
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_NETWORK, "ua_amqp_adaptor.c ::PubSub AQMP: yield: Communication Error.");
+        return UA_STATUSCODE_BADCOMMUNICATIONERROR;
+    }
+
+    /* map mqtt errors to ua errors */
+    const char* errorStr = amqp_error_str(error);
+    UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "ua_amqp_adaptor.c :: PubSub AQMP: yield: error: %s", errorStr);
+
+    switch(error){
+        case AMQP_ERROR_CONNECTION_CLOSED:
+            return UA_STATUSCODE_BADNOTCONNECTED;
+        case AMQP_ERROR_SOCKET_ERROR:
+            return UA_STATUSCODE_BADCOMMUNICATIONERROR;
+        case AMQP_ERROR_CONNECTION_REFUSED:
+            return UA_STATUSCODE_BADCONNECTIONREJECTED;
+
+        default:
+            return UA_STATUSCODE_BADCOMMUNICATIONERROR;
+    }
+
+    // end added by Jacky
+
+
+    UA_StatusCode ret = _write(ctx->ua_connection, ctx->driver);
+    if (UA_STATUSCODE_GOOD != ret) {
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "ua_amqp_adaptor.c :: yieldAmqp: _write failed. ret_code=%s", UA_StatusCode_name(ret));
+        return UA_STATUSCODE_BADCOMMUNICATIONERROR;
+    }
+
+    /*
+     * Handle Pending Events
+     */
+
+    /* pn_connection_driver_next_event() returns NULL if no event is pending */
+    pn_event_t *e = pn_connection_driver_next_event(ctx->driver);
+    for (; e; e = pn_connection_driver_next_event(ctx->driver)) {
+        __handle(ctx, e);
+    }
+
+    /*
+     * Read Buffer
+     * All pending events must be handled before _read() call otherwise some unprocessed events may never complete
+     */
+    ret = _read(ctx->ua_connection, ctx->driver, timeout);
+    if (UA_STATUSCODE_BADCONNECTIONCLOSED == ret) {
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "ua_amqp_adaptor.c :: yieldAmqp: _read failed. ret_code=%s", UA_StatusCode_name(ret));
+        return UA_STATUSCODE_BADCOMMUNICATIONERROR;
+    }
+
+
+    return UA_STATUSCODE_GOOD;
+}

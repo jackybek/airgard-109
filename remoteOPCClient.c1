@@ -1,0 +1,449 @@
+#ifdef EXAMPLE
+github/open62541/examples/pubsub/tutorial_pubsub_subscribe.c
+#endif
+
+
+#ifdef COMPILE
+gcc -std=c99 -v -I/home/pi/open62541/ -I/home/pi/open62541/plugins/ -I/usr/include/libxml2/ -lpthread -lxml2 -lcrypto -lssl open62541.c\
+ SV_Misc.c remoteOPCClient.c -o remoteOPCClient >& error-msg
+#endif
+
+#define PRODUCT_URI "http://virtualskies.com.sg"
+#define APPLICATION_NAME "Client OPCUA based on open62541"
+#define APPLICATION_URI "urn:virtualskies.com.sg"       // follow definition in StartOPCUAServer.c
+
+#define PUBLISHERID                     2234    // used in addDataSetReader() and addPubSubConnection()
+#define WRITERGROUPID                   100     // used in addDataSetReader() and addWriterGroup()
+#define DATASETWRITERID                 62541   // used in addDataSetReader() and addDataSetWriter()
+
+#ifdef UA_ENABLE_PUBSUB_MQTT
+ #define TRANSPORT_PROFILE_URI_MQTT      "http://opcfoundation.org/UA-Profile/Transport/pubsub-mqtt"
+ #define PUBLISH_INTERVAL_MQTT           9000
+ #define CONNECTIONOPTION_NAME_MQTT     "mqttClientId"
+ #define CLIENT_ID_MQTT                 "TESTCLIENTPUBSUBMQTT"
+ #define PUBLISHER_METADATAUPDATETIME_MQTT      0
+ #define PUBLISHER_METADATAQUEUENAME_MQTT       "MetaDataTopic"
+ #define PUBLISHER_TOPIC_MQTT                   "AirgardTopic"
+ #define BROKER_ADDRESS_URL_MQTT                "opc.mqtt://192.168.1.11:1883/"
+ #define USERNAME_OPTION_NAME_MQTT              "mqttUsername"
+ #define PASSWORD_OPTION_NAME_MQTT              "mqttPassword"
+ #define USERNAME_MQTT                  "jackybek"
+ #define PASSWORD_MQTT                  "molekhaven24"
+#endif
+
+
+#include "open62541.h"
+#include <stdio.h>
+#include <string.h>
+
+
+// Subscriber variables
+UA_DataSetReaderConfig readerConfig;
+UA_NodeId readerGroupIdentifier;
+UA_NodeId readerIdentifier;
+
+
+typedef struct {
+char Tag[255];
+char Name[255];
+float Probability;
+char CASnumber[255];
+int Concentration;
+} AlarmStruct;
+
+typedef struct {
+char Tag[255];
+char Name[255];
+float Probability;
+char CASnumber[255];
+int Concentration;
+} NonAlarmStruct;
+
+int g_argc = 0;
+char g_argv_ip[255];    // sensor ip
+int g_argv_port = 0;    // sensor port
+
+char OPCUAServerIP[255];        // OPCUA Server IP
+char MQTTServerIP[255];
+
+char SoftwareVersion[255];
+char DataBlockVersion[255];
+char InstrumentTime[255];
+char MeasurementTime[255];
+
+char BootStatus[255];
+char SnapshotStatus[255];
+char SCPStatus[255];
+char SFTPStatus[255];
+char RunScriptStatus[255];
+char ArchiveStatus[255];
+char AncillarySensorStatus[255];
+
+char Sensor[255];
+UA_Int16 OperatingTime;
+char WarningMessage[255];
+
+UA_Float IgramPP = (UA_Float) 0.0;
+UA_Float IgramDC = (UA_Float) 0.0;
+UA_Float LaserPP = (UA_Float) 0.0;
+UA_Float LaserDC = (UA_Float) 0.0;
+UA_Float SingleBeamAt900 = (UA_Float) 0.0;
+UA_Float SingleBeamAt2500 = (UA_Float) 0.0;
+UA_Int16 SignalToNoiseAt2500 = (UA_Int16) 0.0;
+UA_Float CenterBurstLocation = (UA_Float) 0.0;
+UA_Float DetectorTemp = (UA_Float) 0.0;
+UA_Float LaserFrequency = (UA_Float) 0.0;
+UA_Int16 HardDriveSpace = (UA_Int16) 0.0;
+UA_Float Flow = (UA_Float) 0.0;
+UA_Float Temperature = (UA_Float) 0.0;
+UA_Float Pressure = (UA_Float) 0.0;
+UA_Float TempOptics = (UA_Float) 0.0;
+UA_Int16 BadScanCounter = (UA_Int16) 0;
+UA_Int16 FreeMemorySpace = (UA_Int16) 0;
+
+char LABFilename[255];
+char LOGFilename[255];
+char LgFilename[255];
+char SecondLgFilename[255];
+
+UA_Float SystemCounter = (UA_Float) 0.0;
+UA_Float DetectorCounter = (UA_Float) 0.0;
+UA_Float LaserCounter = (UA_Float) 0.0;
+UA_Float FlowPumpCounter = (UA_Float) 0.0;
+UA_Float DesiccantCounter = (UA_Float) 0.0;
+
+UA_Int16 NoOfAlarms;
+UA_Int16 NoOfNonAlarms;
+int NoOfAlarmsNode;
+AlarmStruct arrayOfAlarm[255];
+char AlarmTag[255];
+char AlarmName[255];
+UA_Float AlarmProbability = (UA_Float) 0.0;
+char AlarmCASnumber[255];
+UA_Int16 AlarmConcentration = (UA_Int16) 0;
+
+int NoOfNonAlarmsNode;
+NonAlarmStruct arrayOfNonAlarm[255];
+
+// for pub sub use
+UA_NodeId ds1IgramPPId;
+UA_NodeId ds1IgramDCId;
+UA_NodeId ds1LaserPPId;
+UA_NodeId ds1LaserDCId;
+
+// for method call
+UA_NodeId outNodeSoftwareVersion;
+UA_NodeId outNodeDataBlockVersion;
+UA_NodeId outNodeInstrumentTime;
+
+
+static UA_StatusCode addDataSetReader(UA_Server *uaServer);
+static UA_StatusCode addSubscribedMethods(UA_Server *uaServer, UA_NodeId dataSetReaderId);
+static void fillDataSetMetaData(UA_DataSetMetaDataType *pMetaData);
+UA_ByteString loadFile(char* filename);
+int main(int argc, char *argv[]);
+
+
+static void fillDataSetMetaData(UA_DataSetMetaDataType *pMetaData)
+{
+
+printf("remoteOPCClient.c : fillDataSetMetaData \n");
+        if (pMetaData == NULL)
+                return;
+
+        UA_DataSetMetaDataType_init(pMetaData);
+        pMetaData->name = UA_STRING("Airgard DataSet");
+
+        pMetaData->fieldsSize = 1;      // number of methods nodes
+        pMetaData->fields = (UA_FieldMetaData*) UA_Array_new(pMetaData->fieldsSize, &UA_TYPES[UA_TYPES_FIELDMETADATA]);
+
+        // getIgramPPMethod()
+        UA_FieldMetaData_init (&pMetaData->fields[0]);
+        UA_NodeId_copy (&UA_TYPES[UA_TYPES_FLOAT].typeId, &pMetaData->fields[0].dataType);
+        pMetaData->fields[0].builtInType = UA_NS0ID_FLOAT;
+        pMetaData->fields[0].name = UA_STRING("getIgramPPMethod");
+        pMetaData->fields[0].valueRank = -1; // scalar;
+
+}
+
+static UA_StatusCode
+addDataSetReader(UA_Server *uaServer)
+{
+        if (uaServer == NULL)
+                return UA_STATUSCODE_BADINTERNALERROR;
+
+printf("remoteOPCClient.c : addDataSetReader() \n");
+
+        UA_StatusCode retval = UA_STATUSCODE_GOOD;
+        memset(&readerConfig, 0, sizeof(UA_DataSetReaderConfig));
+        readerConfig.name = UA_STRING("Airgard DataSet Reader");
+        UA_UInt16 publisherIdentifier = PUBLISHERID;
+        readerConfig.publisherId.type = &UA_TYPES[UA_TYPES_UINT16];
+        readerConfig.publisherId.data = &publisherIdentifier;
+        readerConfig.writerGroupId = WRITERGROUPID;
+        readerConfig.dataSetWriterId = DATASETWRITERID;
+
+        fillDataSetMetaData(&readerConfig.dataSetMetaData);
+        retval |= UA_Server_addDataSetReader(uaServer, readerGroupIdentifier, &readerConfig, &readerIdentifier);
+
+        return retval;
+}
+
+static UA_StatusCode
+addSubscribedMethods(UA_Server *uaServer, UA_NodeId dataSetReaderId)
+{
+
+printf("remoteOPCClient.c : addSubscribeMethods() \n");
+
+                UA_NodeId folderId;
+                UA_String folderName = readerConfig.dataSetMetaData.name;
+                UA_ObjectAttributes oAttr = UA_ObjectAttributes_default;
+                UA_QualifiedName folderBrowseName;
+                UA_StatusCode retval;
+
+                if (folderName.length > 0)
+                {
+                        oAttr.displayName.locale = UA_STRING("en-US");
+                        oAttr.displayName.text = folderName;
+                        folderBrowseName.namespaceIndex = 1;
+                        folderBrowseName.name = folderName;
+                }
+                else
+                {
+                        oAttr.displayName = UA_LOCALIZEDTEXT("en-US", "Subscribed methods");
+                        folderBrowseName = UA_QUALIFIEDNAME(1, "Subscribed methods");
+                }
+
+                UA_Server_addObjectNode(uaServer, UA_NODEID_NULL,
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_OBJECTSFOLDER),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
+                                        folderBrowseName,
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEOBJECTTYPE),
+                                        oAttr, NULL, &folderId);
+
+                UA_FieldTargetVariable *targetVars = (UA_FieldTargetVariable *) UA_calloc(readerConfig.dataSetMetaData.fieldsSize, sizeof(UA_FieldTargetVariable));
+                //for (size_t i=0; i< dataSetReaderConfig.dataSetMetaData.fieldSize; i++)
+                //{
+                        UA_FieldTargetDataType_init(&targetVars[0].targetVariable);
+                        targetVars[0].targetVariable.attributeId = UA_ATTRIBUTEID_VALUE;
+                        targetVars[0].targetVariable.targetNodeId = UA_NODEID_NUMERIC(1, 62543);        // IgramPPMethodNode
+                //}
+
+                retval = UA_Server_DataSetReader_createTargetVariables(uaServer, dataSetReaderId, readerConfig.dataSetMetaData.fieldsSize, targetVars);
+                UA_FieldTargetDataType_clear(&targetVars[0].targetVariable);
+                UA_free(targetVars);
+                UA_free(readerConfig.dataSetMetaData.fields);
+
+}
+
+
+
+int main(int argc, char *argv[])
+{
+        //pthread_t OPCUAClientthread;
+        //pthread_t Airgardthread;
+        int results;
+        //UA_NodeId outNodeId;
+        //int isTreePresent=0;
+        UA_Client *uaClient;
+        UA_ClientConfig *config1;
+        UA_StatusCode retval;
+
+	UA_Boolean MQTT_Enabled = false;
+
+        if ( (argc <2) || (argc > 4) )
+        {
+                printf("Usage : ./remoteOPCClient <OPCUA Server IP> | <MQTT Server IP> [MQTT]\n");
+		printf("example : ./remoteOPCClient 192.168.1.109 \n");
+		printf("example : ./remoteOPCClient 192.168.1.11 MQTT \n");
+                exit (0);
+        }
+        else
+        {
+                // UA_Server *server = UA_Server_new(); // UA_Server_new(config)
+                // UA_ServerConfig *config = UA_Server_getConfig(server);
+                // UA_ServerConfig_setDefault(config);
+
+                g_argc = argc;
+		if (g_argc == 3)
+		{
+			MQTT_Enabled = true;
+			sprintf(MQTTServerIP, "opc.mqtt://%s:4840", argv[1]);
+			printf(MQTTServerIP);
+		}
+		else if (g_argc == 2)
+		{
+			MQTT_Enabled = false;
+                	sprintf(OPCUAServerIP, "opc.tcp://%s:4840", argv[1]);
+		}
+	        printf("In main(): g_argc = %d, argv = %s %s \n", g_argc, argv[0], argv[1]);
+
+
+                // Add Encryption : sample taken from github/examples/access_control_encrypt/client_access_control_encrypt.c
+                //int retval;
+                UA_ByteString certificate = loadFile("/etc/ssl/certs/62541ClientCert.pem"); //=> symbolic link
+                //UA_ByteString certificate = loadFile("/usr/local/ssl/certs/62541ClientCert.pem"); // actual location
+                if (certificate.length == 0)
+                {
+			printf("Unable to load file : 62541ClientCert.pem \n");
+                        UA_LOG_FATAL(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "Unable to load file : 62541ClientCert.pem");
+                        goto cleanup;
+                }
+
+	//printf("here 1 \n");
+
+                UA_ByteString privateKey = loadFile("/usr/local/ssl/private/private-key.pem");
+                if (privateKey.length == 0)
+                {
+			printf("Unable to load file : private-key.pem \n");
+                        UA_LOG_FATAL(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "Unable to load file : private-key.pem");
+                        goto cleanup;
+                }
+
+	//printf("here 2 \n");
+
+                UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "remoteOPCClient : successfully loaded certificate and privateKey");
+
+                // load the trustlist.  Load revocationlist is not supported now
+                size_t trustListSize = 0;
+                UA_STACKARRAY(UA_ByteString, trustList, trustListSize);
+                for(size_t trustListCount=0; trustListCount < trustListSize; trustListCount++)
+                        trustList[trustListCount] = loadFile("/usr/local/ssl/trustlist/trustlist.crl");
+
+                UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "remoteOPCClient : successfully loaded trustList");
+
+	//printf("here 3 \n");
+
+                /* Loading of a revocation list currently unsupported */
+                UA_ByteString *revocationList = NULL;
+                size_t revocationListSize = 0;
+
+                uaClient = UA_Client_new();
+		if (uaClient == NULL)
+		{
+			printf("remoteOPCClient : cannot initialised UA_Client_new() \n");
+			goto cleanup;
+		}
+
+	//printf("here 4 \n");
+
+                config1 = UA_Client_getConfig(uaClient);
+                //UA_ClientConfig_setDefault(config1);
+
+//config1->timeout = 60000;
+//config1->stateCallback = stateCallback;
+                config1->localConnectionConfig = UA_ConnectionConfig_default;
+
+                UA_ApplicationDescription_clear(&config1->clientDescription);
+                config1->clientDescription.applicationUri = UA_STRING_ALLOC(APPLICATION_URI);
+                config1->clientDescription.productUri = UA_STRING_ALLOC(PRODUCT_URI);
+                config1->clientDescription.applicationName = UA_LOCALIZEDTEXT_ALLOC("en", APPLICATION_NAME);
+                config1->clientDescription.applicationType = UA_APPLICATIONTYPE_CLIENT;
+
+                // Secure client connect
+                // config1->securityPoliciesSize = 4;   // Basic128Rsa15, Basic256, Basic256Sha256, Aes128Sha256RsaOaep
+                config1->securityMode = UA_MESSAGESECURITYMODE_SIGNANDENCRYPT;  // require encryption
+                config1->securityPolicyUri = UA_STRING_ALLOC("");
+                config1->secureChannelLifeTime = 10 * 60 * 1000;        // 10 minutes
+                config1->securityPolicies = (UA_SecurityPolicy*)UA_malloc(sizeof(UA_SecurityPolicy));
+
+                if (!config1->securityPolicies)
+                        return UA_STATUSCODE_BADOUTOFMEMORY;
+                UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "remoteOPCClient : config->securityPolicies : success");
+
+	//printf("here 5 \n");
+
+                config1->initConnectionFunc = UA_ClientConnectionTCP_init; /* for async client */
+                config1->pollConnectionFunc = UA_ClientConnectionTCP_poll; /* for async connection */
+                config1->customDataTypes = NULL;
+
+                // Set stateCallback : https://raw.githubusercontent.com/open62541/open62541/master/examples/client_method_async.c
+                // static void stateCallback(UA_Client *client, UA_SecureChannelState channelState, UA_SessionState sessionState, UA_StatusCode conn$
+                //config1->timeout = 60000;
+                //config1->stateCallback = stateCallback;       // function implemented in AG_NewMethod.c
+
+                config1->connectivityCheckInterval = 0;
+                config1->requestedSessionTimeout = 1200000; /* requestedSessionTimeout */
+                config1->inactivityCallback = NULL;
+                config1->clientContext = NULL;
+                config1->connectivityCheckInterval = 3000; // in milliseconds
+
+                #ifdef UA_ENABLE_SUBSCRIPTIONS
+                        config1->outStandingPublishRequests = 10;
+                        config1->subscriptionInactivityCallback = NULL;
+                #endif
+
+	//printf("here 6 \n");
+
+                UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "remoteOPCClient : Calling setDefaultEncryption");
+                UA_ClientConfig_setDefaultEncryption(config1, certificate, privateKey,
+                                                        trustList, trustListSize,
+                                                        revocationList, revocationListSize);
+                UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "remoteOPCClientFinished calling setDefaultEncryption");
+
+	//printf("here 7 \n");
+
+               UA_ByteString_clear(&certificate);
+                UA_ByteString_clear(&privateKey);
+                for(size_t deleteCount = 0; deleteCount < trustListSize; deleteCount++)
+                        UA_ByteString_clear(&trustList[deleteCount]);
+
+                UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "remoteOPCClient : successfully setDefaultEncryption");
+
+	//printf("here 8 \n");
+
+                UA_ByteString_clear(&certificate);
+                UA_ByteString_clear(&privateKey);
+                for(size_t deleteCount = 0; deleteCount < trustListSize; deleteCount++)
+                       UA_ByteString_clear(&trustList[deleteCount]);
+
+		if (MQTT_Enabled == false)
+		{
+	//printf("here 9 \n");
+
+                	UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "remoteOPCClient.c : Just about to call UA_Client_connectUsername() at line 355");
+                	retval = UA_Client_connectUsername(uaClient, OPCUAServerIP, "admin", "defaultadminpassword24");
+                	if (retval != UA_STATUSCODE_GOOD)
+                	{
+                        	UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "remoteOPCClient.c : Cannot login securely to OPCUAServer : %s", OPCUAServerIP);
+                        	goto cleanup;
+                	}
+                	UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "remoteOPCClient.c : UA_Client_connectUsername() : success");
+		}
+		else // (MQTT_Enabled == true)
+		{
+                       UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "remoteOPCClient.c : Just about to call MQTT_connectUsername() at line 355");
+                        retval = UA_Client_connectUsername(uaClient, MQTTServerIP, "jackybek", "molekhaven24");
+                        if (retval != UA_STATUSCODE_GOOD)
+                        {
+                                UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "remoteOPCClient.c : Cannot login securely to MQTT Server : %s", MQTTServerIP);
+                                goto cleanup;
+                        }
+                        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "remoteOPCClient.c : MQTT_connectUsername() : success");
+
+                	retval = addDataSetReader(uaClient);	// subscribe for messages from mqtt broker
+                	retval = addSubscribedMethods(uaClient, readerIdentifier);
+		}
+
+                while (1)
+                {
+			if (MQTT_Enabled == true)
+				InvokeDiagnosticMethodCallback(uaClient);
+
+                        UA_Client_run_iterate(uaClient, 5000);
+                }
+        }
+
+cleanup:
+
+        //pthread_join(OPCthread, NULL);
+        //pthread_join(Airgardthread, NULL);
+
+        //pthread_exit(NULL);
+        printf("In CLEANUP segment !!!! \n");
+        UA_Client_disconnect(uaClient);
+        UA_Client_delete(uaClient);
+        exit;
+}
+
+

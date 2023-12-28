@@ -1,0 +1,206 @@
+
+#include <signal.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <errno.h>
+#include <string.h>
+#include <netdb.h>
+//#include <sys/types.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <pthread.h>
+
+#include <libxml2/libxml/parser.h>
+#include <libxml2/libxml/tree.h>
+#include <libxml2/libxml/xmlreader.h>
+
+#define MAX_BUFFER_SIZE 20000   // max number of bytes we can get at once
+#define PORT 20004
+
+void PopulateOPCUANodes(char* g_argv_ip);
+int ExtractXMLElementNames(xmlNode * a_node);
+
+void PopulateOPCUANodes(char* g_argv_ip)    // g_argv_ip refers to the sensor IP
+{
+    int numbytes;
+    char buffer[MAX_BUFFER_SIZE];
+    int sockfd;
+    struct hostent *he;
+    struct sockaddr_in airgard_addr;        /* connector's address information */
+    int counter=0;
+
+
+
+printf("In PopulateOPCUANodes.c : %s \n", g_argv_ip);
+
+    if ((he = gethostbyname(g_argv_ip)) == NULL)
+    {
+        herror("gethostbyname");
+        exit(-1);
+    }
+
+    if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) == -1)
+    {
+        perror("socket");
+        exit(-1);
+    }
+
+    airgard_addr.sin_family = AF_INET;      /* host byte order */
+    airgard_addr.sin_port = htons(PORT);    /* short, network byte order */
+    //airgard_addr.sin_addr = *((struct in_addr *) he-> h_addr);	// v2.7.2
+    airgard_addr.sin_addr.s_addr = inet_addr(g_argv_ip); // v2.9.9
+    bzero(&(airgard_addr.sin_zero), 8);     /* zero the rest of the struct */
+
+    if (connect(sockfd, (struct sockaddr*) &airgard_addr, sizeof(struct sockaddr)) == -1)
+    {
+        perror("connect");
+        exit(-1);
+    }
+
+printf("after connect socket \n");
+
+//while (1)
+    //{
+        xmlTextReaderPtr xml_TextReaderPtr, xmlPostPtr;
+        xmlDocPtr myxmlDocPtr;
+        xmlNodePtr myxmlNodePtr;
+
+        xmlDoc *myxmlDoc = NULL;
+        xmlNode *root_element = NULL;
+
+        char ConvertToXmlBuffer[MAX_BUFFER_SIZE];
+        int NoOfAttributes;
+        int firstTime = 0;
+
+        xmlChar* MeasurementTime;
+
+        if ((numbytes = recv(sockfd, buffer, MAX_BUFFER_SIZE, 0)) == -1)
+        {
+            perror("recv");
+            exit(-1);
+        }
+        buffer[numbytes] = '\0';
+
+        // step 0 : Add XML header
+        sprintf(ConvertToXmlBuffer, "%s\n%s\n\n",
+            "<?xml version=\"1.0\" standalone=\"no\"?>",
+            "<!DOCTYPE AirGard SYSTEM \"AirGardSubjects.dtd\">");
+        strcat(ConvertToXmlBuffer, buffer);
+
+        if (firstTime == 0)
+        {
+            firstTime = 1;
+        //    printf("Received in pid=%d, stream=\n\n%s\n\n", getpid(), ConvertToXmlBuffer);
+        }
+        else
+            printf("Iterations number : %d\n", ++counter);
+
+        //---------------------------
+        //Documentation can be found at http://www.xmlsoft.org/html/libxml-xmlreader.html#xmlReaderForMemory
+        // initialisation function for the XML Parser.  Call once befre processing in case of use in multi-threaded program
+
+	// xmlInitParser(); // only use for multi-threaded application
+
+        // initialisation function for the Parser Context
+        xmlParserCtxtPtr myxmlParserCtxtPtr;
+printf("after variable declaration myxmlParserCtxtPtr \n");
+
+        if (xmlInitParserCtxt(myxmlParserCtxtPtr) != 0)		// segmentation fault here !!!!!!!
+        {
+            printf("Error : xmlInitParserCtxt\n");
+            // exit(-1);
+        }
+	else printf("successfully initialise xmlParserCtxtPtr \n");
+
+        // create a parse context for an XML in-memory document
+        myxmlParserCtxtPtr = xmlCreateDocParserCtxt(ConvertToXmlBuffer);
+        if (myxmlParserCtxtPtr == NULL)
+        {
+            printf("Error : xmlCreateDocParseCtxt\n");
+            //exit(-1);
+        }
+        else printf("successfully parse the context (AirGardSubjects.dtd)\n");
+
+   // step 0 : parse an XML in-memory document and build a tree.  This reuses the existing @ctxt parser context
+        xmlDocPtr myxmlCtxtReadDoc = xmlCtxtReadDoc(myxmlParserCtxtPtr,
+            					ConvertToXmlBuffer,
+						NULL,
+            					NULL,
+            					XML_PARSE_DTDVALID);
+        if (myxmlCtxtReadDoc == NULL)
+        {
+            printf("Error : xmlCtxtReadDoc\n");
+            //exit(-1);
+        }
+        else printf("Success : xmlCtxtReadDoc\n");
+
+   // alternate step 0 : parse an XML in-memory document build a tree.  This reuses the existing @ctxt parse context
+        xmlDocPtr myxmlCtxtReadMemory = xmlCtxtReadMemory(myxmlParserCtxtPtr,
+            					ConvertToXmlBuffer,
+						sizeof(ConvertToXmlBuffer),
+						NULL,
+						NULL,
+						XML_PARSE_DTDVALID);
+        if (myxmlCtxtReadMemory == NULL)
+        {
+            printf("Error : xmlCtxtReadMemory\n");
+            //exit(-1);
+        }
+        else printf("Success : xmlCtxtReadMemory\n");
+
+  // step 1 : create xmlReaderPtr
+        // xmlReaderForMemory :
+        xml_TextReaderPtr = xmlReaderForMemory(ConvertToXmlBuffer, sizeof(ConvertToXmlBuffer), NULL, NULL, XML_PARSE_DTDVALID);
+        if (xml_TextReaderPtr == NULL)
+        {
+            printf("Step 0: Fail at xmlReaderForMemory\n");
+            //exit(-1);
+        }
+        else printf("Success : xmlReaderForMemory\n");
+
+  // alternate step 1 : create xmlDocPtr
+        // xmlReadDoc : Parse an XML in-memory document and build a tree
+        myxmlDocPtr = xmlReadDoc(ConvertToXmlBuffer, NULL, NULL, XML_PARSE_DTDVALID);
+        if (myxmlDocPtr == NULL)
+        {
+            printf("Error : xmlReadDoc\n");
+            //exit(-1);
+        }
+	else printf("Success : xmlReadDoc \n");
+
+    // step 2 :
+        // xmlParseMemory : parse an XML in-memory block and builds a tree
+        myxmlDocPtr = xmlParseMemory(ConvertToXmlBuffer, sizeof(ConvertToXmlBuffer));
+        if (myxmlDocPtr == NULL)
+        {
+            printf("Error : xmlParseMemory\n");
+            //exit(-1);
+        }
+        else printf("Success : xmlParseMemory\n");
+
+   // alternate step 2 :
+        // xmlParseDoc : parse an XML in-memory document and builds a tree
+        myxmlDocPtr = xmlParseDoc(ConvertToXmlBuffer);
+        if (myxmlDocPtr == NULL)
+        {
+            printf("Error : xmlParseDoc\n");
+            //exit(-1);
+        }
+        else printf("Success : xmlParseDoc\n");
+   // -- end
+
+        myxmlDoc = myxmlDocPtr;
+        root_element = xmlDocGetRootElement(myxmlDoc);
+        ExtractXMLElementNames(root_element);
+        xmlFreeDoc(myxmlDoc);
+
+        //int retval = run_UA_Client(server, r2_airgard_data_Id);// need to pass all the variables into run_UA_Client to write into UA Address space
+        // r2_airgard_data_Id needs to be declared at the front of this function instead of inside the WHILE loop (with the rest)
+
+        //int retval = StartOPCUAClient(server, r2_airgard_data_Id);
+        //return (r2_airgard_data_Id);
+
+       // sleep(9);
+    //}
+}

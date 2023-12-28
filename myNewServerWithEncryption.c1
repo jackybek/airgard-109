@@ -1,0 +1,3181 @@
+// find . open62541_queue.h -std=c99 -v -I/home/pi/open62541/ -lpthread -lxml2 open62541.c myNewMonitor.c myNewMethod.c myNewServer.c -o myNewServer
+
+// without Pub Sub - working
+// gcc -std=c99 -v -I/home/pi/open62541/ -I/home/pi/open62541/plugins/ -I/usr/include/libxml2/ -lpthread -lxml2 -lcrypto -lssl open62541.c myNewMonitor.c 
+// myNewMethod.c myNewServerWithEncryption.c -o myNewServerWithEncryption
+
+// for Pub Sub
+// option 1
+// gcc -std=c99 -v -I/home/pi/open62541/ -I/home/pi/open62541/plugins/ -lpthread -lxml2 open62541.c myNewMonitor.c myNewMethod.c myNewServer.c myNewPubSub.c -o myNewServer >& error-msg
+// option 2
+// gcc -std=c99 -c -v -I/home/pi/open62541/ -I/home/pi/open62541/plugins/ -lpthread -lxml2 open62541.c ua_pubsub_udp.c myNewPubSub.c  >& error-msg
+
+// for Historical access
+// gcc -std=c99 -v -I/home/pi/open62541/ -lpthread -lxml2 open62541.c myNewServer.c ua_history_database_default.c ua_history_data_gathering_default.c ua_history_data_backend_memory.c \
+// myNewMonitor.c myNewMethod.c -o myNewServer
+
+// myNewServer <1p address to connect> <port>
+
+#include "open62541.h"
+#define UA_ENABLE_HISTORIZING
+#define PORT 20004
+#define DATAPORT 20004		// the port client will be connecting to - for incoming data
+#define COMMANDPORT 10004       // the port client will be connecting to - for outgoing commands
+#define MAX_BUFFER_SIZE 20000   // max number of bytes we can get at once
+
+#define PRODUCT_URI "http://virtualskies.com.sg"
+#define MANUFACTURER_NAME "Virtual Skies"
+#define PRODUCT_URI "http://virtualskies.com.sg"
+#define APPLICATION_NAME "Airgard OPCUA adaptor based on open62541"
+#define APPLICATION_URI "urn:virtualskies.com.sg"
+#define APPLICATION_URI_SERVER "urn:virtualskies.server.application"
+#define PRODUCT_NAME "Virtual Skies OPC UA Server"
+#define STRINGIFY(arg) #arg
+#define VERSION(MAJOR, MINOR, PATCH, LABEL) \
+    STRINGIFY(MAJOR) "." STRINGIFY(MINOR) "." STRINGIFY(PATCH) LABEL
+
+#define PRIVATEKEYLOC "/usr/local/ssl/private/private-key.pem"
+#define SSLCERTIFICATELOC "/etc/ssl/certs/62541ServerCert.pem"
+#define TRUSTLISTLOC "/usr/local/ssl/trustlist/trustlist.crl"
+#define UA_ENABLE_ENCRYPTION
+
+#include "myNewServerWithEncryption.h"
+#include "myNewMethod.h"
+#include "myNewMonitor.h"
+//#include "myNewPubSub.h"
+
+//#include <open62541/plugin/historydata/history_data_backend_memory.h>
+//#include <open62541/plugin/historydata/history_data_gathering_default.h>
+//#include <open62541/plugin/historydata/history_database_default.h>
+//#include <open62541/plugin/historydatabase.h>
+
+#include <signal.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <errno.h>
+#include <string.h>
+#include <netdb.h>
+//#include <sys/types.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <pthread.h>
+
+//#include <xml.h>
+#include <libxml2/libxml/parser.h>
+#include <libxml2/libxml/tree.h>
+#include <libxml2/libxml/xmlreader.h>
+
+/*
+#include <open62541/plugin/log_stdout.h>
+#include <open62541/plugin/pubsub_ethernet.h>
+#include <open62541/plugin/pubsub_udp.h>
+#include <open62541/server.h>
+#include <open62541/server_config_default.h>
+*/
+
+/*
+#include <open62541/client_highlevel.h>
+#include <open62541/client_subscriptions.h>
+#include <open62541/plugin/log_stdout.h>
+*/
+
+
+typedef struct {
+char Tag[255];
+char Name[255];
+float Probability;
+char CASnumber[255];
+int Concentration;
+} AlarmStruct;
+
+typedef struct {
+char Tag[255];
+char Name[255];
+float Probability;
+char CASnumber[255];
+int Concentration;
+} NonAlarmStruct;
+
+static volatile UA_Boolean running = true;
+static UA_Boolean UA_Nodes_Setup = false;
+
+int sockfd;
+int command_sockfd; // kiv
+int data_sockfd;    // kiv
+int g_argc;
+char g_argv_ip[255];
+int g_argv_port = 0;
+int g_argv_commandport = 0; // kiv
+int g_argv_dataport = 0;    // kiv
+
+char SoftwareVersion[255];
+char DataBlockVersion[255];
+char InstrumentTime[255];
+char MeasurementTime[255];
+
+char BootStatus[255];
+char SnapshotStatus[255];
+char SCPStatus[255];
+char SFTPStatus[255];
+char RunScriptStatus[255];
+char ArchiveStatus[255];
+char AncillarySensorStatus[255];
+
+char Sensor[255];
+UA_Int16 OperatingTime;
+char WarningMessage[255];
+
+UA_Float IgramPP = (UA_Float) 0.0;
+UA_Float IgramDC = (UA_Float) 0.0;
+UA_Float LaserPP = (UA_Float) 0.0;
+UA_Float LaserDC = (UA_Float) 0.0;
+UA_Float SingleBeamAt900 = (UA_Float) 0.0;
+UA_Float SingleBeamAt2500 = (UA_Float) 0.0;
+UA_Int16 SignalToNoiseAt2500 = (UA_Int16) 0.0;
+UA_Float CenterBurstLocation = (UA_Float) 0.0;
+UA_Float DetectorTemp = (UA_Float) 0.0;
+UA_Float LaserFrequency = (UA_Float) 0.0;
+UA_Int16 HardDriveSpace = (UA_Int16) 0.0;
+UA_Float Flow = (UA_Float) 0.0;
+UA_Float Temperature = (UA_Float) 0.0;
+UA_Float Pressure = (UA_Float) 0.0;
+UA_Float TempOptics = (UA_Float) 0.0;
+UA_Int16 BadScanCounter = (UA_Int16) 0;
+UA_Int16 FreeMemorySpace = (UA_Int16) 0;
+
+char LABFilename[255];
+char LOGFilename[255];
+char LgFilename[255];
+char SecondLgFilename[255];
+
+UA_Float SystemCounter = (UA_Float) 0.0;
+UA_Float DetectorCounter = (UA_Float) 0.0;
+UA_Float LaserCounter = (UA_Float) 0.0;
+UA_Float FlowPumpCounter = (UA_Float) 0.0;
+UA_Float DesiccantCounter = (UA_Float) 0.0;
+
+//shifted the definition from function due to need to create additional nodes under Airgard->Data
+//UA_NodeId r2_airgard_data_Id;   // subtree (1,10400)
+
+UA_Int16 NoOfAlarms;
+UA_Int16 NoOfNonAlarms;
+
+int NoOfAlarmsNode=0;
+AlarmStruct arrayOfAlarm[255];	//101
+/*
+char AlarmTag[255];
+char AlarmName[255];
+UA_Float AlarmProbability = (UA_Float) 0.0;
+char AlarmCASnumber[255];
+UA_Int16 AlarmConcentration = (UA_Int16) 0;
+*/
+
+int NoOfNonAlarmsNode=0;
+NonAlarmStruct arrayOfNonAlarm[255];
+
+int initialStartup = 1; // used in run_UA_Client() to determine if need to initialise NoOfNonAlarmsNode = 0 and NoOfAlarmsNode = 0
+
+/*
+UA_Client *uaClient = NULL;
+UA_EndpointDescription *endpointArray = NULL;
+size_t endpointArraySize =0;
+UA_StatusCode retval;
+*/
+
+
+/* Struct initialization works across ANSI C/C99/C++ if it is done when the
+ * variable is first declared. Assigning values to existing structs is
+ * heterogeneous across the three. */
+static UA_INLINE UA_UInt32Range
+UA_UINT32RANGE(UA_UInt32 min, UA_UInt32 max) {
+    UA_UInt32Range range = {min, max};
+    return range;
+}
+
+static UA_INLINE UA_DurationRange
+UA_DURATIONRANGE(UA_Duration min, UA_Duration max) {
+    UA_DurationRange range = {min, max};
+    return range;
+}
+
+// sample found in /open62541/examples/common.h
+// parses the certificate file - used in StartOPCUAServer.c
+UA_ByteString loadFile(const char *const path)
+{
+    UA_ByteString fileContents = UA_STRING_NULL;
+
+    /* Open the file */
+    FILE *fp = fopen(path, "rb");
+    if(!fp) {
+        errno = 0; /* We read errno also from the tcp layer... */
+        return fileContents;
+    }
+
+    /* Get the file length, allocate the data and read */
+    fseek(fp, 0, SEEK_END);
+    fileContents.length = (size_t)ftell(fp);
+    fileContents.data = (UA_Byte *)UA_malloc(fileContents.length * sizeof(UA_Byte));
+    if(fileContents.data) {
+        fseek(fp, 0, SEEK_SET);
+        size_t read = fread(fileContents.data, sizeof(UA_Byte), fileContents.length, fp);
+        if(read != fileContents.length)
+            UA_ByteString_clear(&fileContents);
+    } else {
+        fileContents.length = 0;
+    }
+    fclose(fp);
+
+    return fileContents;
+}
+
+
+static UA_Boolean
+allowAddNode(UA_Server *server, UA_AccessControl *ac,
+		const UA_NodeId *sessionId, void *sessionContext,
+		const UA_AddNodesItem *item)
+{
+	printf("Called allowAddNode \n");
+	return UA_TRUE;
+}
+
+static UA_Boolean
+allowDeleteNode(UA_Server *server, UA_AccessControl *ac,
+		const UA_NodeId *sessionId, void *sessionContext,
+		const UA_DeleteNodesItem *item)
+{
+	printf("Called allowDeleteNode \n");
+	return UA_TRUE;
+}
+
+static UA_Boolean
+allowBrowseNode(UA_Server *server, UA_AccessControl *ac,
+                const UA_NodeId *sessionId, void *sessionContext,
+                const UA_NodeId *nodeId, void *nodeContext)
+{
+        printf("Called allowBrowseNode \n");
+        return UA_TRUE;
+}
+
+
+static UA_Boolean allowHistoryUpdateUpdateData(UA_Server *server, UA_AccessControl *ac,
+                const UA_NodeId *sessionId, void *sessionContext,
+                const UA_NodeId *nodeId,
+                UA_PerformUpdateType performInsertReplace,
+                const UA_DataValue *value)
+{
+	printf("Called allowHistoryUpdateUpdateData \n");
+	return UA_TRUE;
+}
+
+
+static void stopHandler(int sig) {
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "received ctrl-c");
+    running = false;
+}
+
+// global variable //
+static const size_t usernamePasswordsSize = 2;
+static UA_UsernamePasswordLogin logins[2] = {
+        {UA_STRING_STATIC("jackybek"), UA_STRING_STATIC("thisisatestpassword24")},
+	{UA_STRING_STATIC("admin"),UA_STRING_STATIC("defaultadminpassword24")}
+};
+
+//================================================================
+static UA_StatusCode
+createEndpoint(UA_ServerConfig *conf, UA_EndpointDescription *endpoint,
+               const UA_SecurityPolicy *securityPolicy,
+               UA_MessageSecurityMode securityMode)
+{
+    UA_EndpointDescription_init(endpoint);
+
+    endpoint->securityMode = securityMode;
+    UA_String_copy(&securityPolicy->policyUri, &endpoint->securityPolicyUri);
+    endpoint->transportProfileUri =
+        UA_STRING_ALLOC("http://opcfoundation.org/UA-Profile/Transport/uatcp-uasc-uabinary");
+
+    /* Add security level value for the corresponding message security mode */
+    endpoint->securityLevel = (UA_Byte) securityMode;
+    UA_String_copy(&securityPolicy->policyUri, &endpoint->securityPolicyUri);
+    endpoint->transportProfileUri =
+        UA_STRING_ALLOC("http://opcfoundation.org/UA-Profile/Transport/uatcp-uasc-uabinary");
+
+    /* Add security level value for the corresponding message security mode */
+    endpoint->securityLevel = (UA_Byte) securityMode;
+
+    /* Enable all login mechanisms from the access control plugin  */
+    UA_StatusCode retval = UA_Array_copy(conf->accessControl.userTokenPolicies,
+                                         conf->accessControl.userTokenPoliciesSize,
+                                         (void **)&endpoint->userIdentityTokens,
+                                         &UA_TYPES[UA_TYPES_USERTOKENPOLICY]);
+
+    	if(retval != UA_STATUSCODE_GOOD)
+	{
+        	UA_String_clear(&endpoint->securityPolicyUri);
+        	UA_String_clear(&endpoint->transportProfileUri);
+        	return retval;
+    	}
+    	endpoint->userIdentityTokensSize = conf->accessControl.userTokenPoliciesSize;
+
+    	UA_String_copy(&securityPolicy->localCertificate, &endpoint->serverCertificate);
+    	UA_ApplicationDescription_copy(&conf->applicationDescription, &endpoint->server);
+
+    	return UA_STATUSCODE_GOOD;
+}
+
+//void StartOPCUAServer(int argc, char *argv[])
+void *StartOPCUAServer(void *x_void_ptr)
+{
+    signal(SIGINT, stopHandler);
+    signal(SIGTERM, stopHandler);
+
+	UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,"In StartOPCUAServer thread: g_argc=%d\n", g_argc);
+
+	// UA_Server *server = (UA_Server *)x_void_ptr;-- caused it to crash when UA_newWithConfig(config);
+
+	UA_Server *uaServer1 = NULL;
+
+	UA_ServerConfig config1;
+	memset(&config1, 0, sizeof(UA_ServerConfig));	//UA_Server *server = UA_Server_new();
+
+        //Check for arguments :: <myNewServer 192.168.2.88 20004(data)>
+	/*
+        if(g_argc == 2)   //hostname or ip address and a port number are available
+        {
+                UA_Int16 port_number = g_argv_port; //UA_Int16 port_number = atoi(g_argv[2]);
+                UA_ServerConfig_setMinimal(UA_Server_getConfig(server), port_number, 0);
+        }
+        else
+	{
+		printf("in UA_ServerConfig_setDefault \n");
+        	UA_ServerConfig_setDefault(UA_Server_getConfig(server));
+		printf("after UA_ServerConfig_setDefault \n");
+	}
+	*/
+
+        if(g_argc == 3)
+        {       //hostname or ip address available
+                //copy the hostname from char * to an open62541 variable
+		//printf("in g_argc segment %s %d %d\n", g_argv_ip, g_argv_port);
+
+		char* OPCUAServerIP = "192.168.2.33:4840";
+		UA_String hostname;
+                UA_String_init(&hostname);
+                //hostname.length = strlen(g_argv[1]);
+                //hostname.data = (UA_Byte *) g_argv[1];
+		//hostname.length = strlen(g_argv_ip);
+		//hostname.data = (UA_Byte *) g_argv_ip;
+
+		hostname.data = (UA_Byte*)OPCUAServerIP;
+
+                //Change the configuration
+                //UA_ServerConfig_setCustomHostname(UA_Server_getConfig(server), hostname);
+		//printf("hostname.data (ip) = %s\n", hostname.data);
+
+        	// start OPCUA Server
+        	UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "starting server...");
+
+		UA_StatusCode retval;
+
+		// encryption routine
+    		/* Load certificate and private key */
+		UA_ByteString certificate = loadFile(SSLCERTIFICATELOC);
+		//UA_ByteString certificate = loadFile("/etc/ssl/certs/62541ServerCert.pem");	// => symbolic link
+   		//UA_ByteString certificate = loadFile("/usr/local/ssl/certs/62541ServerCert.pem");  // actual location
+		if (certificate.length == 0)
+			goto cleanup;
+ 
+    		UA_ByteString privateKey = loadFile(PRIVATEKEYLOC);
+    		//UA_ByteString privateKey = loadFile("/usr/local/ssl/private/private-key.pem");
+		if (privateKey.length == 0)
+			goto cleanup;
+
+		UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,"StartOPCUAServer.c : after loading certificate and privateKey");
+
+    		/* Load the trustlist */
+    		size_t trustListSize = 0;
+    		UA_STACKARRAY(UA_ByteString, trustList, trustListSize);
+    		for(size_t i = 0; i < trustListSize; i++)
+        		trustList[i] = loadFile(TRUSTLISTLOC); //"/usr/local/ssl/trustlist/trustlist.crl");
+
+    		/* Loading of a issuer list, not used in this application */
+    		size_t issuerListSize = 0;
+    		UA_ByteString *issuerList = NULL;
+
+    		/* Loading of a revocation list currently unsupported */
+    		UA_ByteString *revocationList = NULL;
+    		size_t revocationListSize = 0;
+
+    		retval = UA_ServerConfig_setDefaultWithSecurityPolicies(&config1, 4840,			// swap config with config1
+                                                       &certificate, &privateKey,
+                                                       trustList, trustListSize,
+                                                       issuerList, issuerListSize,
+                                                       revocationList, revocationListSize);
+
+                // refer to open62541.org->Server->Server Configuration & plugins/ua_config_default for the list of members in the UA_ServerConfig structure
+		if (!&config1)
+		{
+			//return UA_STATUSCODE_BADINVALIDARGUMENT;
+			goto cleanup;
+		}
+		if (config1.nodestore.context == NULL)
+			UA_Nodestore_HashMap(&config1.nodestore);
+
+		//if (!config1.logger.log)
+		//	config1.logger = UA_Log_Stdout;
+
+                config1.shutdownDelay = 5000.0; // millisecond
+                config1.securityPolicyNoneDiscoveryOnly = UA_TRUE;
+ 		config1.serverCertificate = certificate;
+
+		// Server Description
+		UA_BuildInfo_clear(&config1.buildInfo);
+		config1.buildInfo.productUri = UA_STRING_ALLOC(PRODUCT_URI);
+		config1.buildInfo.manufacturerName = UA_STRING_ALLOC(MANUFACTURER_NAME);
+		config1.buildInfo.productName = UA_STRING_ALLOC(PRODUCT_NAME);
+		config1.buildInfo.softwareVersion =
+			UA_STRING_ALLOC(VERSION(UA_OPEN62541_VER_MAJOR, UA_OPEN62541_VER_MINOR,
+						UA_OPEN62541_VER_PATCH, UA_OPEN62541_VER_LABEL));
+
+		config1.buildInfo.buildDate = UA_DateTime_now();
+		config1.buildInfo.buildNumber = UA_STRING_ALLOC(__DATE__ " " __TIME__);
+
+		UA_ApplicationDescription_clear(&config1.applicationDescription);
+                config1.applicationDescription.applicationUri = UA_STRING_ALLOC(APPLICATION_URI);
+		config1.applicationDescription.productUri = UA_STRING_ALLOC(PRODUCT_URI);
+		config1.applicationDescription.applicationName = UA_LOCALIZEDTEXT_ALLOC("en", APPLICATION_NAME);
+		config1.applicationDescription.applicationType = UA_APPLICATIONTYPE_SERVER;
+	    	/* conf->applicationDescription.gatewayServerUri = UA_STRING_NULL; */
+    		/* conf->applicationDescription.discoveryProfileUri = UA_STRING_NULL; */
+    		/* conf->applicationDescription.discoveryUrlsSize = 0; */
+    		/* conf->applicationDescription.discoveryUrls = NULL; */
+
+		UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "StartOPCUAServer.c : after making changes to config1");
+
+		// Certificate Verification that accepts every certificate. Can be
+	     	// overwritten when the policy is specialized.
+		UA_CertificateVerification_AcceptAll(&config1.certificateVerification);
+
+		// Limits for SecureChannels
+		config1.maxSecureChannels = 40;
+		config1.maxSecurityTokenLifetime = 10 * 60 * 1000; // 10 minutes */
+
+		// Limits for Sessions
+		config1.maxSessions = 100;
+		config1.maxSessionTimeout = 60 * 60 * 1000;	// 1 hour
+
+		// Limits for MonitoredItems
+		config1.samplingIntervalLimits = UA_DURATIONRANGE(50.0, 24.0 * 3600.0 * 1000.0);
+		config1.queueSizeLimits = UA_UINT32RANGE(1, 100);
+
+		// Limits for Discovery
+		//config1.discoveryCleanupTimeout = 60 * 60;
+
+		UA_ByteString_clear(&certificate);
+    		UA_ByteString_clear(&privateKey);
+    		for(size_t i = 0; i < trustListSize; i++)
+        		UA_ByteString_clear(&trustList[i]);
+	// end encryption routine
+
+	// add userid and password to the UA_Server
+		// disable anonymous logins, enable 2 user/password logins
+		config1.accessControl.clear(&config1.accessControl);
+		retval = UA_AccessControl_default(&config1, false, &config1.securityPolicies[config1.securityPoliciesSize-1].policyUri, 2, logins);
+		if (retval != UA_STATUSCODE_GOOD)
+			goto cleanup;
+
+		// set accessControl functions for nodeManagement
+		config1.accessControl.allowAddNode = allowAddNode;
+		config1.accessControl.allowDeleteNode = allowDeleteNode;
+		config1.accessControl.allowBrowseNode = allowBrowseNode;
+		UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "adding 2 user credentials to OPCUA server ...\n");
+	// end userid and password routine
+
+	/*
+		#ifdef UA_ENABLE_PUBSUB
+					printf("\tJust about to start the OPCUA Server UADP thread\n");
+
+					// start OPCUA Server
+					UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "starting server...");
+
+					retval = UA_Server_run(server, &running); // blocking call - to test United Automation (ok)
+					if(retval != UA_STATUSCODE_GOOD)
+							goto cleanup;
+		#else
+	*/
+
+
+
+/*
+        	//retval = UA_Server_run(server, &running); // blocking call - to test United Automation (ok)
+        	retval = UA_Server_run_startup(server); //  non blocking call (not okay - BadTimeout
+        	if(retval != UA_STATUSCODE_GOOD)
+                	goto cleanup;
+*/
+
+		// start OPCUA Server
+        	UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "starting OPCUA server ...\n");
+
+        	uaServer1 = UA_Server_newWithConfig(&config1);
+
+        	//Add a new namespace to the server
+        	UA_Int16 ns_MKS = UA_Server_addNamespace(uaServer1, "MKS");
+        	UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "New Namespace added with Nr. %d \n", ns_MKS);
+        	retval = UA_Server_run(uaServer1, &running);
+        	if (retval != UA_STATUSCODE_GOOD)
+                	goto cleanup;
+        	else
+                	UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "OPCUA server started successfully ...\n");
+
+        	//      #endif
+        }
+
+cleanup:
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "Server was shut down");
+    UA_Server_delete(uaServer1);
+    close(sockfd);
+    close(command_sockfd);
+    //dlose(data_sockfd);
+    //return retval == UA_STATUSCODE_GOOD ? EXIT_SUCCESS : EXIT_FAILURE;
+
+}
+
+xmlNodePtr srSeekChildNodeNamed(xmlNode* p, char* name, int len)
+{
+	xmlNodePtr curr_node;
+
+	if (p == NULL || name == NULL)
+		return NULL;
+	for (curr_node=p; curr_node; curr_node=curr_node->next)
+	{
+		printf("In for loop : curr_node content : %s\n", (char*)xmlNodeGetContent(curr_node));
+
+		printf("In the loop : (Len=%d) Comparing <curr_node->name> with <name> | %s : %s \n", len, curr_node->name, name);
+		if (strncmp(curr_node->name, name, len) == 0)	// look for xmlNode with tag = <name>
+		{
+			// found seatch string <name>
+			printf("----------------Found In srSeekChildNodeNamed() [line 195] : searching for %s, found %s; returning the xmlNodePtr\n", name, curr_node->name);
+			return curr_node;
+		}
+	}
+}
+
+int extract_element_names(xmlNode *a_node)
+{
+	// extract elements from XML file; this is NOT the OPCStructure
+
+	xmlNode *curr_node = NULL;
+	xmlNode *ori_node = a_node;	// keeps the pointer at the start position for seek()
+	int NumOfChildNodes = 0;
+	//char currentNodeName[255];
+	int retval;
+
+	xmlNode *alarm_node= a_node;		// use to traverse alarm segment only
+	xmlNode *alarm_childnode = NULL;
+	xmlNode *nonalarm_node = a_node;	// use to travese nonalarm segment only
+	xmlNode *nonalarm_childnode = NULL;
+
+	char mystring[255];
+
+	for (curr_node=a_node; curr_node; curr_node =curr_node->next)
+	{
+		if (curr_node->type == XML_ELEMENT_NODE)
+		{
+			if (strncmp(curr_node->name, "SoftwareVersion", 15) == 0)			// curr_node->name
+			{
+				strcpy(SoftwareVersion, (char*)xmlNodeGetContent(curr_node));
+				//printf("Software Version node found : %s\n", SoftwareVersion);
+			}
+			else if (strncmp(curr_node->name, "DataBlockVersion", 16) == 0)
+			{
+				strcpy(DataBlockVersion, (char*)xmlNodeGetContent(curr_node));
+				//printf("Data Block Version node found : %s\n", DataBlockVersion);
+			}
+			// end <Airgard> section
+			else if (strncmp(curr_node->name, "InstrumentTime", 14) == 0)
+			{
+				strcpy(InstrumentTime, (char*)xmlNodeGetContent(curr_node));
+				//printf("Instrument Time node found : %s\n", InstrumentTime);
+			}
+			else if (strncmp(curr_node->name, "MeasurementTime", 15) == 0)
+			{
+				strcpy(MeasurementTime, (char*)xmlNodeGetContent(curr_node));
+				//printf("Measurement Time node found : %s\n", MeasurementTime);
+			}
+			// <Info> Section
+                               	else if (strncmp(curr_node->name, "BootStatus",10) == 0)
+                               	{
+                                       	strcpy(BootStatus, (char*)xmlNodeGetContent(curr_node));
+                                       	//printf("\tBootStatus node found : %s\n", BootStatus);
+				}
+                                else if (strncmp(curr_node->name, "SnapshotStatus",14) == 0)
+                                {
+                                        strcpy(SnapshotStatus, (char*)xmlNodeGetContent(curr_node));
+                                        //printf("\tSnapshotStatus node found : %s\n", SnapshotStatus);
+                                }
+                                else if (strncmp(curr_node->name, "SCPStatus",9) == 0)
+                                {
+                                        strcpy(SCPStatus, (char*)xmlNodeGetContent(curr_node));
+                                        //printf("\tSCPStatus node found : %s\n", SCPStatus);
+                                }
+                                else if (strncmp(curr_node->name, "SFTPStatus",10) == 0)
+                                {
+                                        strcpy(SFTPStatus, (char*)xmlNodeGetContent(curr_node));
+                                        //printf("\tSFTPStatus node found : %s\n", SFTPStatus);
+                                }
+                                else if (strncmp(curr_node->name, "RunScriptStatus",15) == 0)
+                                {
+                                        strcpy(RunScriptStatus, (char*)xmlNodeGetContent(curr_node));
+                                        //printf("\tRunScriptStatus node found : %s\n", RunScriptStatus);
+                                }
+                                else if (strncmp(curr_node->name, "ArchiveStatus",13) == 0)
+                                {
+                                        strcpy(ArchiveStatus, (char*)xmlNodeGetContent(curr_node));
+                                        //printf("\tArchiveStatus node found : %s\n", ArchiveStatus);
+                                }
+                                else if (strncmp(curr_node->name, "AncillarySensorStatus",21) == 0)
+                                {
+                                        strcpy(AncillarySensorStatus, (char*)xmlNodeGetContent(curr_node));
+                                        //printf("\tAncillarySensorStatus node found : %s\n", AncillarySensorStatus);
+                                }
+			// end <Info> Section
+			else if (strncmp(curr_node->name, "Sensor", 6) == 0)
+			{
+				strcpy(Sensor, (char*)xmlNodeGetContent(curr_node));
+				//printf("\tSensor node found : %s\n", Sensor);
+			}
+			else if (strncmp(curr_node->name, "OperatingTime", 13) == 0)
+			{
+				OperatingTime = atoi(xmlNodeGetContent(curr_node));
+				//printf("\tOperatingTime node found : %d\n", OperatingTime);
+			}
+			else if (strncmp(curr_node->name, "WarningMessage", 14) == 0)
+			{
+				strcpy(WarningMessage, (char*)xmlNodeGetContent(curr_node));
+				//printf("\tWarningMessage node found : %s\n", WarningMessage);
+			}
+			// end  <Status> Section
+			else if (strncmp(curr_node->name, "IgramPP",7) == 0)
+			{
+				IgramPP = (UA_Float) atof(xmlNodeGetContent(curr_node));
+				//printf("IgramPP node found : %f\n", IgramPP);
+			}
+			else if (strncmp(curr_node->name, "IgramDC", 7) == 0)
+			{
+				IgramDC = (UA_Float) atof(xmlNodeGetContent(curr_node));
+				//printf("IgramDC node found : %f\n", IgramDC);
+			}
+			else if (strncmp(curr_node->name, "LaserPP",7) == 0)
+			{
+				LaserPP = (UA_Float) atof(xmlNodeGetContent(curr_node));
+				//printf("LaserPP node found : %f\n", LaserPP);
+			}
+			else if (strncmp(curr_node->name, "LaserDC",7) == 0)
+			{
+				LaserDC = (UA_Float) atof(xmlNodeGetContent(curr_node));
+				//printf("LaserDC node found : %f\n", LaserDC);
+			}
+			else if (strncmp(curr_node->name, "SingleBeamAt900",15) == 0)
+			{
+				SingleBeamAt900 = (UA_Float) atof(xmlNodeGetContent(curr_node));
+				//printf("SingleBeamAt900 node found : %f\n", SingleBeamAt900);
+			}
+                        else if (strncmp(curr_node->name, "SingleBeamAt2500",16) == 0)
+                        {
+                                SingleBeamAt2500 = (UA_Float) atof(xmlNodeGetContent(curr_node));
+                                //printf("SingleBeamAt2500 node found : %f\n", SingleBeamAt2500);
+                        }
+                        else if (strncmp(curr_node->name, "SignalToNoiseAt2500",19) == 0)
+                        {
+                                SignalToNoiseAt2500 = (UA_Int16) atoi(xmlNodeGetContent(curr_node));
+                                //printf("SignalToNoiseAt2500 node found : %d\n", SignalToNoiseAt2500);
+                        }
+                        else if (strncmp(curr_node->name, "CenterBurstLocation",19) == 0)
+                        {
+                                CenterBurstLocation = (UA_Float) atof(xmlNodeGetContent(curr_node));
+                                //printf("CenterBurstLocation node found : %f\n", CenterBurstLocation);
+                        }
+			else if (strncmp(curr_node->name, "DetectorTemp",12) == 0)
+			{
+				DetectorTemp = (UA_Float) atof(xmlNodeGetContent(curr_node));
+				//printf("DetectorTemp node found : %f\n", DetectorTemp);
+			}
+                        else if (strncmp(curr_node->name, "LaserFrequency",14) == 0)
+                        {
+                                LaserFrequency = (UA_Float) atof(xmlNodeGetContent(curr_node));
+                                //printf("LaserFrequency node found : %f\n", LaserFrequency);
+                        }
+                        else if (strncmp(curr_node->name, "HardDriveSpace",14) == 0)
+                        {
+                                HardDriveSpace = (UA_Int16) atoi(xmlNodeGetContent(curr_node));
+                                //printf("HardDriveSpace node found : %d\n", HardDriveSpace);
+                        }
+                        else if (strncmp(curr_node->name, "Flow",4) == 0)
+                        {
+                                Flow = (UA_Float) atof(xmlNodeGetContent(curr_node));
+                                //printf("Flow node found : %f\n", Flow);
+                        }
+                        else if (strncmp(curr_node->name, "Temperature",11) == 0)
+                        {
+                                Temperature = (UA_Float) atof(xmlNodeGetContent(curr_node));
+                                //printf("Temperature node found : %f\n", Temperature);
+                        }
+                        else if (strncmp(curr_node->name, "Pressure",8) == 0)
+                        {
+                                Pressure = (UA_Float) atof(xmlNodeGetContent(curr_node));
+                                //printf("Pressure node found : %f\n", Pressure);
+                        }
+                        else if (strncmp(curr_node->name, "TempOptics",10) == 0)
+                        {
+                                TempOptics = (UA_Float) atof(xmlNodeGetContent(curr_node));
+                                //printf("TempOptics node found : %f\n", TempOptics);
+                        }
+                        else if (strncmp(curr_node->name, "BadScanCounter",14) == 0)
+                        {
+                                BadScanCounter = (UA_Int16) atoi(xmlNodeGetContent(curr_node));
+                                //printf("BadScanCounter node found : %d\n", BadScanCounter);
+                        }
+                        else if (strncmp(curr_node->name, "FreeMemorySpace",15) == 0)
+                        {
+                                FreeMemorySpace = (UA_Int16) atoi(xmlNodeGetContent(curr_node));
+                                //printf("FreeMemorySpace node found : %d\n", FreeMemorySpace);
+                        }
+                        else if (strncmp(curr_node->name, "LABFilename",11) == 0)
+                        {
+                                strcpy(LABFilename, xmlNodeGetContent(curr_node));
+                                //printf("LABFilename node found : %s\n", LABFilename);
+                        }
+                        else if (strncmp(curr_node->name, "LOGFilename",11) == 0)
+                        {
+                                strcpy(LOGFilename, xmlNodeGetContent(curr_node));
+                                //printf("LOGFilename node found : %s\n", LOGFilename);
+                        }
+                        else if (strncmp(curr_node->name, "LgFilename",10) == 0)
+                        {
+                                strcpy(LgFilename, xmlNodeGetContent(curr_node));
+                                //printf("LgFilename node found : %s\n", LgFilename);
+                        }
+                        else if (strncmp(curr_node->name, "SecondLgFilename",16) == 0)
+                        {
+                                strcpy(SecondLgFilename, xmlNodeGetContent(curr_node));
+                                //printf("SecondLgFilename node found : %s\n", SecondLgFilename);
+                        }
+                        else if (strncmp(curr_node->name, "SystemCounter",13) == 0)
+                        {
+                                SystemCounter = (UA_Float) atof(xmlNodeGetContent(curr_node));
+                                //printf("SystemCounter node found : %f\n", SystemCounter);
+                        }
+                        else if (strncmp(curr_node->name, "DetectorCounter",15) == 0)
+                        {
+                                DetectorCounter = (UA_Float) atof(xmlNodeGetContent(curr_node));
+                                //printf("DetectorCounter node found : %f\n", DetectorCounter);
+                        }
+                        else if (strncmp(curr_node->name, "LaserCounter",12) == 0)
+                        {
+                                LaserCounter = (UA_Float) atof(xmlNodeGetContent(curr_node));
+                                //printf("LaserCounter node found : %f\n", LaserCounter);
+                        }
+                        else if (strncmp(curr_node->name, "FlowPumpCounter",15) == 0)
+                        {
+                                FlowPumpCounter = (UA_Float) atof(xmlNodeGetContent(curr_node));
+                                //printf("FlowPumpCounter node found : %f\n", FlowPumpCounter);
+                        }
+                        else if (strncmp(curr_node->name, "DesiccantCounter",16) == 0)
+                        {
+                                DesiccantCounter = (UA_Float) atof(xmlNodeGetContent(curr_node));
+                                //printf("DesiccantCounter node found : %f\n", DesiccantCounter);
+                        }
+			// end <Diagnostic> section
+			else if (strncmp(curr_node->name, "Alarms",6) == 0)
+			{
+				// here only check the node <Data>-><Alarms>
+				// xmlNodeGetContent() : from libxml2
+				NoOfAlarmsNode = (UA_Int16) atoi(xmlNodeGetContent(curr_node));
+				NoOfAlarms = NoOfAlarmsNode;		// update to global variable
+					printf("line 487 : NoOfAlarmsNode = %d, NodeName = %s \n", NoOfAlarmsNode, curr_node->name);
+
+				if (NoOfAlarmsNode > 0)				// check for NULL pointer
+				{
+					printf("491: NoOfAlarmsNode = %d \n", NoOfAlarmsNode);
+					printf("in IF section: %s\n", xmlNodeGetContent(curr_node)); // value = 1 : correct <Alarms>1</Alarms>
+
+					alarm_node = curr_node;			// use a new pointer to traverse the alarms segment; start at <Alarms>
+					printf("1. After alarm_node = curr_node: %s \n", alarm_node->name);	// value = Alarms : correct
+					alarm_node = alarm_node->next; 		// advance pointer to <Alarm> node
+					printf("2. After alarm_node = alarm_node->next: %s \n", alarm_node->name);	// value = text : wrong
+					printf("2a. xmlNodeGetContent  is %s \n", (char *)xmlNodeGetContent(alarm_node));
+					alarm_node = alarm_node->next;
+					printf("3.  After advance : node name is <%s> \n", alarm_node->name);		// value = Alarm : correct
+
+					alarm_childnode = alarm_node;
+					for (int i=0; i < NoOfAlarmsNode; i++)		//kiv: , alarm_childnode; i++)
+					{
+				        // <Alarms>1</Alarms>
+        	        		// <Alarm>		<== alarm_node
+                			//   <Tag>CWA1</Tag>
+                			//   <Name>CWA1</Name>
+                			//   <Probability>3.3</Probability>
+                			//   <CASnumber>123-4</CASnumber>
+                			//   <Concentration>3</Concentration>
+                			// </Alarm>
+
+						alarm_childnode = alarm_node->children;
+
+						printf("line 515: Inspect alarm_childnode \n");
+
+						alarm_childnode = alarm_childnode->next; // jump over text
+						printf("TAG: <%s> %s \n", alarm_childnode->name, (char *)xmlNodeGetContent(alarm_childnode));		// TAG
+						strncpy(arrayOfAlarm[i].Tag, xmlNodeGetContent(alarm_childnode), 254);	// extract the value from node : <Tag>
+						alarm_childnode = alarm_childnode->next;
+
+						alarm_childnode = alarm_childnode->next; // jump over text
+						printf("NAME: <%s> %s \n", alarm_childnode->name, (char *)xmlNodeGetContent(alarm_childnode));		// NAME
+						strncpy(arrayOfAlarm[i].Name, (char*) xmlNodeGetContent(alarm_childnode), 254);	// extract the value from node : <Name>
+						alarm_childnode = alarm_childnode->next;
+
+						alarm_childnode = alarm_childnode->next; // jump over text
+						//printf("PROBABILITY: <%s> %f\n", alarm_childnode->name, AlarmProbability);		// PROBABILITY
+						printf("PROBABILITY: <%s> %f \n", alarm_childnode->name, (UA_Float)atof(xmlNodeGetContent(alarm_childnode)));
+						//AlarmProbability = (UA_Float) atof(xmlNodeGetContent(alarm_childnode)); 		// extract the value from node : <Probability>
+						//arrayOfAlarm[i].Probability = (float) AlarmProbability;
+						arrayOfAlarm[i].Probability =(float) atof(xmlNodeGetContent(alarm_childnode));
+						alarm_childnode = alarm_childnode->next;
+
+						alarm_childnode = alarm_childnode->next; // jump over text
+						printf("CASnumber: <%s> %s \n", alarm_childnode->name, (char *)xmlNodeGetContent(alarm_childnode));		// CASnumber
+						strncpy(arrayOfAlarm[i].CASnumber, (char*) xmlNodeGetContent(alarm_childnode), 254);		// extract the value from node : <CASnumber>
+						alarm_childnode = alarm_childnode->next;
+
+						alarm_childnode = alarm_childnode->next; // jump over text
+						printf("CONCENTRATION: <%s> %d \n", alarm_childnode->name, (int)atoi(xmlNodeGetContent(alarm_childnode)));		// Concentration
+						//AlarmConcentration = (UA_Int16) atoi(xmlNodeGetContent(alarm_childnode)); 		// extract the value from node : <AlarmConcentration>
+						//arrayOfAlarm[i].Concentration = (int) AlarmConcentration;
+						arrayOfAlarm[i].Concentration = (int)atoi(xmlNodeGetContent(alarm_childnode));
+						printf("=======================================\n");
+						//sleep(3);
+						//alarm_childnode = alarm_childnode->next;	// should be null
+
+						if ((i+1) < NoOfAlarmsNode)
+						{
+							//printf("check the position of alarm_childnode : %s %s \n", alarm_childnode->name, (char *)xmlNodeGetContent(alarm_childnode));
+							alarm_childnode = alarm_childnode->next; // jump over </Concentration>
+							alarm_childnode = alarm_childnode->next; // jump over </Alarm>
+
+							// repeat the cycle for the next <Alarm> segment
+							alarm_node = alarm_node->next;		// jump over text
+							alarm_node = alarm_node->next;		// advance pointer to next node : <Alarm>
+							//printf("check the position of alarm_node : %s %s \n", alarm_node->name, (char *)xmlNodeGetContent(alarm_node)); // correct : <Alarm>
+						}
+						else
+							break; // exit FOR loop
+					}
+					printf("Alarms node found in extract_element_names()\n");
+					printf("----No of alarms discovered : <Data> -> <Alarms>%d<Alarms>---- : %d\n", NoOfAlarmsNode, NoOfAlarmsNode);
+				}
+				else printf("Did not enter IF loop (Alarms)\n");
+			}
+			else if (strncmp(curr_node->name, "NonAlarms",9) == 0)
+			{
+                                // here only check the node <Data>-><NonAlarms>
+                                // xmlNodeGetContent() : from libxml2
+                                NoOfNonAlarmsNode = (UA_Int16) atoi(xmlNodeGetContent(curr_node));
+                                NoOfNonAlarms = NoOfNonAlarmsNode;            // update to global variable
+                                        printf("line 578 : NoOfNonAlarmsNode = %d, NodeName = %s \n", NoOfNonAlarmsNode, curr_node->name);
+
+                                if (NoOfNonAlarmsNode > 0)                         // check for NULL pointer
+                                {
+                                        printf("582: NoOfNonAlarmsNode = %d \n", NoOfNonAlarmsNode);
+                                        printf("in IF section: %s\n", xmlNodeGetContent(curr_node)); // value = 1 : correct <NonAlarms>1</NonAlarms>
+
+                                        nonalarm_node = curr_node;                 // use a new pointer to traverse the alarms segment; start at <NonAlarms>
+                                        printf("1. After nonalarm_node = curr_node: %s \n", nonalarm_node->name);     // value = Alarms : correct
+                                        nonalarm_node = nonalarm_node->next;          // advance pointer to <Alarm> node
+                                        printf("2. After nonalarm_node = nonalarm_node->next: %s \n", nonalarm_node->name);      // value = text : wrong
+                                        printf("2a. xmlNodeGetContent  is %s \n", (char *)xmlNodeGetContent(nonalarm_node));
+                                        nonalarm_node = nonalarm_node->next;
+                                        printf("3.  After advance : node name is <%s> \n", nonalarm_node->name);           // value = NonAlarm : correct
+
+                                        nonalarm_childnode = nonalarm_node;
+                                        for (int i=0; i < NoOfNonAlarmsNode; i++)          //kiv: , alarm_childnode; i++)
+                                        {
+                                        // <NonAlarms>1</NonAlarms>
+                                        // <NonAlarm>              <== nonalarm_node
+                                        //   <Tag>CWA1</Tag>
+                                        //   <Name>CWA1</Name>
+                                        //   <Probability>3.3</Probability>
+                                        //   <CASnumber>123-4</CASnumber>
+                                        //   <Concentration>3</Concentration>
+                                        // </NonAlarm>
+
+                                                nonalarm_childnode = nonalarm_node->children;
+
+                                                printf("line 607: Inspect nonalarm_childnode \n");
+
+                                                nonalarm_childnode = nonalarm_childnode->next; // jump over text
+                                                printf("TAG: <%s> %s \n", nonalarm_childnode->name, (char *)xmlNodeGetContent(nonalarm_childnode));           // TAG
+                                                strncpy(arrayOfNonAlarm[i].Tag, xmlNodeGetContent(nonalarm_childnode), 254);  // extract the value from node : <Tag>
+                                                nonalarm_childnode = nonalarm_childnode->next;
+
+                                                nonalarm_childnode = nonalarm_childnode->next; // jump over text
+                                                printf("NAME: <%s> %s \n", nonalarm_childnode->name, (char *)xmlNodeGetContent(nonalarm_childnode));          // NAME
+                                                strncpy(arrayOfNonAlarm[i].Name, (char*) xmlNodeGetContent(nonalarm_childnode), 254); // extract the value from node : <Name>
+                                                nonalarm_childnode = nonalarm_childnode->next;
+
+                                                nonalarm_childnode = nonalarm_childnode->next; // jump over text
+                                                //printf("PROBABILITY: <%s> %f\n", nonalarm_childnode->name, AlarmProbability);            // PROBABILITY
+                                                printf("PROBABILITY: <%s> %f \n", nonalarm_childnode->name, (UA_Float)atof(xmlNodeGetContent(nonalarm_childnode)));
+                                                //NonAlarmProbability = (UA_Float) atof(xmlNodeGetContent(nonalarm_childnode));               // extract the value from node : <Probability>
+                                                //arrayOfNonAlarm[i].Probability = (float) NonAlarmProbability;
+                                                arrayOfNonAlarm[i].Probability =(float) atof(xmlNodeGetContent(nonalarm_childnode));
+                                                nonalarm_childnode = nonalarm_childnode->next;
+
+                                                nonalarm_childnode = nonalarm_childnode->next; // jump over text
+                                                printf("CASnumber: <%s> %s \n", nonalarm_childnode->name, (char *)xmlNodeGetContent(nonalarm_childnode));             // CASnumber
+                                                strncpy(arrayOfNonAlarm[i].CASnumber, (char*) xmlNodeGetContent(nonalarm_childnode), 254);            // extract the value from node : <CASnumber>
+                                                nonalarm_childnode = nonalarm_childnode->next;
+
+                                                nonalarm_childnode = nonalarm_childnode->next; // jump over text
+                                                printf("CONCENTRATION: <%s> %d \n", nonalarm_childnode->name, (int)atoi(xmlNodeGetContent(nonalarm_childnode)));              // Concentration
+                                                //AlarmConcentration = (UA_Int16) atoi(xmlNodeGetContent(nonalarm_childnode));             // extract the value from node : <NonAlarmConcentration>
+                                                //arrayOfNonAlarm[i].Concentration = (int) NonAlarmConcentration;
+                                                arrayOfNonAlarm[i].Concentration = (int)atoi(xmlNodeGetContent(nonalarm_childnode));
+                                                printf("=======================================\n");
+                                                //sleep(3);
+                                                //nonalarm_childnode = nonalarm_childnode->next;      // should be null
+
+                                                if ((i+1) < NoOfNonAlarmsNode)
+                                                {
+                                                        //printf("check the position of nonalarm_childnode : %s %s \n", nonalarm_childnode->name, (char *)xmlNodeGetContent(nonalarm_childnode));
+                                                        nonalarm_childnode = nonalarm_childnode->next; // jump over </Concentration>
+                                                        nonalarm_childnode = nonalarm_childnode->next; // jump over </NonAlarm>
+
+                                                        // repeat the cycle for the next <NonAlarm> segment
+                                                        nonalarm_node = nonalarm_node->next;          // jump over text
+                                                        nonalarm_node = nonalarm_node->next;          // advance pointer to next node : <NonAlarm>
+                                                        //printf("check the position of nonalarm_node : %s %s \n", nonalarm_node->name, (char *)xmlNodeGetContent(nonalarm_node)); // correct : <NonAlarm>
+                                                }
+                                                else
+                                                        break; // exit FOR loop
+                                        }
+                                        printf("NonAlarms node found in extract_element_names()\n");
+                                        printf("----No of non alarms discovered : <Data> -> <NonAlarms>%d<NonAlarms>---- : %d\n", NoOfNonAlarmsNode, NoOfNonAlarmsNode);
+                                }
+                                else printf("Did not enter IF loop (nonAlarms) \n");
+                        }
+			extract_element_names(curr_node->children);
+		}
+ 	}
+	//printf("----------end extract_element_names()-------------------\n");
+} // End extract_element_names()
+
+
+int run_UA_Client(UA_Server *server, char* g_argv_ip, UA_NodeId r2_airgard_data_Id)
+{
+	// g_argv_ip refers to the Sensor IP taken from the command line : 192.168.2.88
+
+	//Instantiate an OPCUA Client to update OPCUA Server Address space
+	static UA_Client *uaClient=NULL;
+	char* OPCUAServerIP = "192.168.2.33:4840";	// refer to localhost
+
+	//int retval=0;
+	//size_t endpointDescriptionSize;
+	//UA_EndpointDescription *endpointDescriptions=NULL;
+
+	if (uaClient == NULL)
+	{
+ 		printf("============================================================\n");
+    		printf("Entering run_UA_Client() aka StartOPCUAClient()\n");
+    		printf("============================================================\n");
+		//int retval;
+		//uaClient = UA_Client_new();
+    		//UA_ClientConfig_setDefault(UA_Client_getConfig(uaClient));
+    		// Listing endpoints
+    		//endpointDescriptions = NULL;
+    		//endpointDescriptionSize = 0;
+
+		//UA_Client_connect(uaClient, "opc.tcp://192.168.2.109:4840");
+		// UA Client is running in the same IP as the UA Server.
+		// load certificate and private key
+		// stop here for SSL code :: UA_ByteString openSSLcert = loadFile("home/pi/open62541/
+		//UA_Client_connect(uaClient,"localhost");
+
+
+
+		/*
+    		retval = UA_Client_getEndpoints(uaClient, "opc.tcp://192.168.2.109:4840",
+							*endpointDescriptionSize, *endpointDescriptions);
+		if (retval != UA_STATUSCODE_GOOD)
+		{
+			UA_Array_delete(endpointDescriptions, endpointDescriptionSize, &UA_TYPES[UA_TYPES_ENDPOINTDESCRIPTION]);
+			UA_Client_delete(uaClient);
+			return (-1);// EXIT_FAILURE;
+		}
+		*/
+
+		printf("********************************In run_UA_Client() to update UA Server Address space****************************************************\n");
+
+        	// Add Encryption : sample taken from github/examples/access_control_encrypt/client_access_control_encrypt.c
+                //int retval;
+                UA_ByteString certificate = loadFile("/etc/ssl/certs/62541ClientCert.pem"); //=> symbolic link
+		//UA_ByteString certificate = loadFile("/usr/local/ssl/certs/62541ClientCert.pem"); // actual location
+		if (certificate.length == 0)
+		{
+			UA_LOG_FATAL(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "Unable to load file : 62541ClientCert.pem");
+                        return EXIT_FAILURE;
+		}
+
+                UA_ByteString privateKey = loadFile("/usr/local/ssl/private/private-key.pem");
+                if (privateKey.length == 0)
+		{
+			UA_LOG_FATAL(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "Unable to load file : private-key.pem");
+                        return (EXIT_FAILURE);
+		}
+
+		UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "run_UA_Client (NA_mainOPCUAClient) : successfully loaded certificate and privateKey");
+
+                // load the trustlist.  Load revocationlist is not supported now
+                size_t trustListSize = 0;
+                UA_STACKARRAY(UA_ByteString, trustList, trustListSize);
+                for(size_t trustListCount=0; trustListCount < trustListSize; trustListCount++)
+                        trustList[trustListCount] = loadFile("/usr/local/ssl/trustlist/trustlist.crl");
+
+                UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "run_UA_Client (NA_mainOPCUAClient) : successfully loaded trustList");
+
+                /* Loading of a revocation list currently unsupported */
+                UA_ByteString *revocationList = NULL;
+                size_t revocationListSize = 0;
+
+        	uaClient = UA_Client_new();
+       		UA_ClientConfig *config1 = UA_Client_getConfig(uaClient);
+
+		config1->localConnectionConfig = UA_ConnectionConfig_default;
+		config1->timeout = 5000;
+
+                UA_ApplicationDescription_clear(&config1->clientDescription);
+                config1->clientDescription.applicationUri = UA_STRING_ALLOC(APPLICATION_URI);
+                config1->clientDescription.productUri = UA_STRING_ALLOC(PRODUCT_URI);
+                config1->clientDescription.applicationName = UA_LOCALIZEDTEXT_ALLOC("en", APPLICATION_NAME);
+                config1->clientDescription.applicationType = UA_APPLICATIONTYPE_CLIENT;
+
+		// Secure client connect
+    		//config1->securityPoliciesSize = 4;	// Basic128Rsa15, Basic256, Basic256Sha256, Aes128Sha256RsaOaep
+		config1->securityMode = UA_MESSAGESECURITYMODE_SIGNANDENCRYPT;	// require encryption
+		config1->securityPolicyUri = UA_STRING_ALLOC("");
+		config1->secureChannelLifeTime = 10 * 60 * 1000;	// 10 minutes
+    		config1->securityPolicies = (UA_SecurityPolicy*)UA_malloc(sizeof(UA_SecurityPolicy));
+    		if (!config1->securityPolicies)
+        		return UA_STATUSCODE_BADOUTOFMEMORY;
+                UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "run_UA_Client (NA_mainOPCUAClient) : config->securityPolicies : success");
+
+    		config1->initConnectionFunc = UA_ClientConnectionTCP_init; /* for async client */
+    		config1->pollConnectionFunc = UA_ClientConnectionTCP_poll; /* for async connection */
+    		config1->customDataTypes = NULL;
+    		config1->stateCallback = NULL;
+		config1->connectivityCheckInterval = 0;
+    		config1->requestedSessionTimeout = 1200000; /* requestedSessionTimeout */
+    		config1->inactivityCallback = NULL;
+    		config1->clientContext = NULL;
+		config1->connectivityCheckInterval = 3000; // in milliseconds
+
+		#ifdef UA_ENABLE_SUBSCRIPTIONS
+			config1->outStandingPublishRequests = 10;
+    			config1->subscriptionInactivityCallback = NULL;
+		#endif
+
+                UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "Calling setDefaultEncryption");
+                UA_ClientConfig_setDefaultEncryption(config1, certificate, privateKey,
+                                                        trustList, trustListSize,
+                                                        revocationList, revocationListSize);
+                UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "Finished calling setDefaultEncryption");
+
+
+                UA_ByteString_clear(&certificate);
+                UA_ByteString_clear(&privateKey);
+                for(size_t deleteCount = 0; deleteCount < trustListSize; deleteCount++)
+                        UA_ByteString_clear(&trustList[deleteCount]);
+
+                UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "run_UA_Client (NA_mainOPCUAClient) : successfully setDefaultEncryption");
+
+                UA_ByteString_clear(&certificate);
+                UA_ByteString_clear(&privateKey);
+                for(size_t deleteCount = 0; deleteCount < trustListSize; deleteCount++)
+                       UA_ByteString_clear(&trustList[deleteCount]);
+
+		// next connect to the server and create+activate a session with username / password
+		//retval = UA_Client_connect(uaClient, OPCUAServerIP); // use anonymous login
+		UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "Just about to call run_UA_Client: UA_Client_connectUsername() at line 355");
+                UA_StatusCode retval = UA_Client_connectUsername(uaClient, "opc.tcp://192.168.2.33:4840", "admin", "defaultadminpassword24");	//malloc(): memory corruption (fast)
+                if (retval != UA_STATUSCODE_GOOD)
+                {
+                        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "run_UA_Client (NA_mainOPCUAClient) : Cannot login securely to OPCUAServer : %s", OPCUAServerIP);
+                        return(EXIT_FAILURE);
+                }
+		UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "run_UA_Client:UA_Cllient_connectUsername() : success");
+
+ 	        // end add encryption
+
+		/*
+		printf("%d endpoints found\n", (int)endpointDescriptionSize);
+		for(size_t i=0;i<endpointDescriptionSize;i++)
+		{
+			printf("URL of endpoint %d is %ss\n",
+			(int)i,
+			(int)endpointDescriptions[i].endpointUrl.length,
+			endpointDescriptions[i].endpointUrl.data);
+		}
+		*/
+
+	}
+
+	//connect to UA_Server and update UA_AddressSpace with data
+
+	UA_Variant *val = UA_Variant_new();	// for scalar variables
+        UA_Variant *varStrSoftwareVersion;
+	UA_Variant *varStrDataBlockVersion;
+	UA_Variant *varStrInstrumentTime;
+	UA_Variant *varStrMeasurementTime;
+	UA_Variant *varStrBootStatus;
+	UA_Variant *varStrSnapshotStatus;
+	UA_Variant *varStrSCPStatus;
+	UA_Variant *varStrSFTPStatus;
+	UA_Variant *varStrRunScriptStatus;
+	UA_Variant *varStrArchiveStatus;
+	UA_Variant *varStrAncillarySensorStatus;
+	UA_Variant *varStrSensor;
+	UA_Variant *varStrWarningMessage;
+	UA_Variant *varStrLABFilename;
+	UA_Variant *varStrLOGFilename;
+	UA_Variant *varStrLgFilename;
+	UA_Variant *varStrSecondLgFilename;
+
+	UA_Variant *varStrAlarms;
+	UA_Variant *varStrAlarmTag;
+	UA_Variant *varStrAlarmName;
+	UA_Variant *varStrAlarmProbability;
+	UA_Variant *varStrAlarmCASnumber;
+	UA_Variant *varStrAlarmConcentration;
+
+	UA_Variant *varStrNonAlarms;
+	UA_Variant *varStrNonAlarmTag;
+        UA_Variant *varStrNonAlarmName;
+        UA_Variant *varStrNonAlarmProbability;
+        UA_Variant *varStrNonAlarmCASnumber;
+        UA_Variant *varStrNonAlarmConcentration;
+
+
+	char mystring[32];
+	int retval;
+
+	// Start initialising/ clearing alarm / non alarm nodes
+	// when program first start up, i want to force PreviousAlarmsQty and PreviousNonAlarmsQty = 0
+	// then delete all existing AlarmNodes and NonAlarmNodes=> since it has just started up, there are no Alarm/NonAlarm nodes to remove
+	// next cycle, (if there are AlarmNodes created in the previous cycle, it gets remove here
+
+        UA_Int16 zero_data=0;
+	UA_Variant *PreviousAlarmsQty;
+	UA_Variant *PreviousNonAlarmsQty;
+	int AlarmCounter=0, NonAlarmCounter=0;
+
+	PreviousAlarmsQty = UA_Variant_new();
+	PreviousNonAlarmsQty = UA_Variant_new();
+
+	if (initialStartup == 1)
+	{
+		initialStartup = 0;
+		UA_Variant_setScalar(PreviousAlarmsQty, &zero_data, &UA_TYPES[UA_TYPES_INT16]);
+		UA_Variant_setScalar(PreviousNonAlarmsQty, &zero_data, &UA_TYPES[UA_TYPES_INT16]);
+
+	        AlarmCounter = 0;
+        	NonAlarmCounter = 0;
+       	 	printf("line 660 : after initialStartup : %d %d \n", AlarmCounter, NonAlarmCounter);
+	}
+	else
+	{
+		// subsequent cycle => get the number of AlarmNodes and Non AlarmNodes created in the previous cycle
+		retval = UA_Client_readValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10401), PreviousAlarmsQty);
+		if (retval == UA_STATUSCODE_GOOD && UA_Variant_hasScalarType(PreviousAlarmsQty, &UA_TYPES[UA_TYPES_INT16]))
+		{
+			UA_Int16 raw_data = *(UA_Int16 *)PreviousAlarmsQty->data;
+			AlarmCounter = raw_data;
+		}
+		else
+			AlarmCounter = 0;
+
+       	 	printf("line 1204 : else section of initialStartup : %d %d \n", AlarmCounter, NonAlarmCounter);
+
+		retval = UA_Client_readValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10402), PreviousNonAlarmsQty);
+		if (retval == UA_STATUSCODE_GOOD && UA_Variant_hasScalarType(PreviousNonAlarmsQty, &UA_TYPES[UA_TYPES_INT16]))
+		{
+			UA_Int16 raw_data = *(UA_Int16 *)PreviousNonAlarmsQty->data;
+			NonAlarmCounter = raw_data;
+		}
+		else
+			NonAlarmCounter = 0;
+	}
+
+	// no matter whether it is the first round or subsequent round, set the node value to 0
+        UA_Variant_setScalar(val,&zero_data, &UA_TYPES[UA_TYPES_INT16]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10401), val);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10402), val);
+
+        printf("line 709 : before entering FOR loop \n");
+	printf("PreviousAlarmsQty : %d, PreviousNonAlarmsQty : %d \n", AlarmCounter, NonAlarmCounter);  // return a huge value
+
+        // Now, based on the previous qty, removes all child AlarmNodes and child NonAlarmNodes
+	for (int i=0; i<AlarmCounter; i++)
+	{
+		char AlarmsNode[255];
+
+		// remove child nodes first (variable nodes)
+		// kiv for tag, name, ...
+	        if (uaClient!= NULL)
+		{
+			sprintf(AlarmsNode, "A%d:Tag", i+1);
+			UA_Client_deleteNode(uaClient, UA_NODEID_STRING(1, AlarmsNode), false);
+			sprintf(AlarmsNode, "A%d:Name", i+1);
+			UA_Client_deleteNode(uaClient, UA_NODEID_STRING(1, AlarmsNode), false);
+			sprintf(AlarmsNode, "A%d:Concentration", i+1);
+			UA_Client_deleteNode(uaClient, UA_NODEID_STRING(1, AlarmsNode), false);
+			sprintf(AlarmsNode, "A%d:CASnumber", i+1);
+			/*738*/UA_Client_deleteNode(uaClient, UA_NODEID_STRING(1, AlarmsNode), false);
+			sprintf(AlarmsNode, "A%d:Probability", i+1);
+			UA_Client_deleteNode(uaClient, UA_NODEID_STRING(1, AlarmsNode), false);
+
+			// finally remove the parent (object node)
+			//printf("715 : before delete parenet node : Alarm-%d", i+1);
+			sprintf(AlarmsNode, "Alarm-%d", i+1);
+        		UA_Client_deleteNode(uaClient, UA_NODEID_STRING(1, AlarmsNode), false);
+		}
+	}
+        for (int i=0; i<NonAlarmCounter; i++)
+        {
+                char NonAlarmsNode[255];
+
+		if (uaClient!=NULL)
+		{
+	                sprintf(NonAlarmsNode, "NA%d:Tag", i+1);
+                	UA_Client_deleteNode(uaClient, UA_NODEID_STRING(1, NonAlarmsNode), false);
+			sprintf(NonAlarmsNode, "NA%d:Name", i+1);
+                        UA_Client_deleteNode(uaClient, UA_NODEID_STRING(1, NonAlarmsNode), false);
+                        sprintf(NonAlarmsNode, "NA%d:Concentration", i+1);
+                        UA_Client_deleteNode(uaClient, UA_NODEID_STRING(1, NonAlarmsNode), false);
+                        sprintf(NonAlarmsNode, "NA%d:CASnumber", i+1);
+                        /*842*/UA_Client_deleteNode(uaClient, UA_NODEID_STRING(1, NonAlarmsNode), false);
+                        sprintf(NonAlarmsNode, "NA%d:Probability", i+1);
+                        UA_Client_deleteNode(uaClient, UA_NODEID_STRING(1, NonAlarmsNode), false);
+
+                        // finally remove the parent (object node)
+                        //printf("847 : before delete parenet node : NonAlarm-%d", i+1);
+                        sprintf(NonAlarmsNode, "NonAlarm-%d", i+1);
+                        UA_Client_deleteNode(uaClient, UA_NODEID_STRING(1, NonAlarmsNode), false);
+                }
+
+        }
+	// finished initialising/ clearing alarm / non alarm nodes
+
+        varStrSoftwareVersion = UA_Variant_new();
+	if (varStrSoftwareVersion!=NULL)
+	{
+		UA_String tmpSoftwareVersion = UA_STRING(SoftwareVersion);
+        	UA_Variant_setScalarCopy(varStrSoftwareVersion, &tmpSoftwareVersion, &UA_TYPES[UA_TYPES_STRING]);
+        	UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10001), varStrSoftwareVersion);
+        	UA_Variant_delete(varStrSoftwareVersion);
+	}
+
+        varStrDataBlockVersion = UA_Variant_new();
+	if (varStrDataBlockVersion!=NULL)
+	{
+		UA_String tmpDataBlockVersion = UA_STRING(DataBlockVersion);
+        	UA_Variant_setScalarCopy(varStrDataBlockVersion, &tmpDataBlockVersion, &UA_TYPES[UA_TYPES_STRING]);
+        	UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10002), varStrDataBlockVersion);
+        	UA_Variant_delete(varStrDataBlockVersion);
+	}
+
+	//------
+	printf("10100\n");
+        varStrInstrumentTime = UA_Variant_new();
+	if (varStrInstrumentTime!=NULL)
+	{
+		UA_String tmpInstrumentTime = UA_STRING(InstrumentTime);
+        	UA_Variant_setScalarCopy(varStrInstrumentTime, &tmpInstrumentTime, &UA_TYPES[UA_TYPES_STRING]);
+        	UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10101), varStrInstrumentTime);
+        	UA_Variant_delete(varStrInstrumentTime);
+	}
+
+        varStrMeasurementTime = UA_Variant_new();
+	if (varStrMeasurementTime!=NULL)
+	{
+		UA_String tmpMeasurementTime = UA_STRING(MeasurementTime);
+        	UA_Variant_setScalarCopy(varStrMeasurementTime, &tmpMeasurementTime, &UA_TYPES[UA_TYPES_STRING]);
+        	UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10102), varStrMeasurementTime);
+        	UA_Variant_delete(varStrMeasurementTime);
+	}
+
+	//-----
+	printf("10210\n");
+        varStrBootStatus = UA_Variant_new();
+	if (varStrBootStatus!=NULL)
+	{
+		UA_String tmpBootStatus = UA_STRING(BootStatus);
+        	UA_Variant_setScalarCopy(varStrBootStatus, &tmpBootStatus, &UA_TYPES[UA_TYPES_STRING]);
+        	UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10211), varStrBootStatus);
+        	UA_Variant_delete(varStrBootStatus);
+	}
+
+        varStrSnapshotStatus = UA_Variant_new();
+	if (varStrSnapshotStatus!=NULL)
+	{
+		UA_String tmpSnapshotStatus = UA_STRING(SnapshotStatus);
+        	UA_Variant_setScalarCopy(varStrSnapshotStatus, &tmpSnapshotStatus, &UA_TYPES[UA_TYPES_STRING]);
+        	UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10212), varStrSnapshotStatus);
+        	UA_Variant_delete(varStrSnapshotStatus);
+	}
+
+        varStrSCPStatus = UA_Variant_new();
+	if (varStrSCPStatus!=NULL)
+	{
+		UA_String tmpSCPStatus =UA_STRING(SCPStatus);
+   		UA_Variant_setScalarCopy(varStrSCPStatus, &tmpSCPStatus, &UA_TYPES[UA_TYPES_STRING]);
+        	UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10213), varStrSCPStatus);
+        	UA_Variant_delete(varStrSCPStatus);
+	}
+
+        varStrSFTPStatus = UA_Variant_new();
+	if (varStrSFTPStatus!=NULL)
+	{
+		UA_String tmpSFTPStatus = UA_STRING(SFTPStatus);
+        	UA_Variant_setScalarCopy(varStrSFTPStatus, &tmpSFTPStatus, &UA_TYPES[UA_TYPES_STRING]);
+        	UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10214), varStrSFTPStatus);
+        	UA_Variant_delete(varStrSFTPStatus);
+	}
+
+	varStrRunScriptStatus = UA_Variant_new();
+	if (varStrRunScriptStatus!=NULL)
+	{
+		UA_String tmpRunScriptStatus = UA_STRING(RunScriptStatus);
+        	UA_Variant_setScalarCopy(varStrRunScriptStatus, &tmpRunScriptStatus, &UA_TYPES[UA_TYPES_STRING]);
+        	UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10215), varStrRunScriptStatus);
+        	UA_Variant_delete(varStrRunScriptStatus);
+	}
+
+        varStrArchiveStatus = UA_Variant_new();
+	if (varStrArchiveStatus!=NULL)
+	{
+		UA_String tmpArchiveStatus = UA_STRING(ArchiveStatus);
+        	UA_Variant_setScalarCopy(varStrArchiveStatus, &tmpArchiveStatus, &UA_TYPES[UA_TYPES_STRING]);
+        	UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10216), varStrArchiveStatus);
+        	UA_Variant_delete(varStrArchiveStatus);
+	}
+
+        varStrAncillarySensorStatus = UA_Variant_new();
+	if (varStrAncillarySensorStatus!=NULL)
+	{
+		UA_String tmpAncillarySensorStatus = UA_STRING(AncillarySensorStatus);
+        	UA_Variant_setScalarCopy(varStrAncillarySensorStatus, &tmpAncillarySensorStatus, &UA_TYPES[UA_TYPES_STRING]);
+        	UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10217), varStrAncillarySensorStatus);
+        	UA_Variant_delete(varStrAncillarySensorStatus);
+	}
+	//--
+	//printf("10200\n");
+        varStrSensor = UA_Variant_new();
+	if (varStrSensor!=NULL)
+	{
+		UA_String tmpSensor = UA_STRING(Sensor);
+        	UA_Variant_setScalarCopy(varStrSensor, &tmpSensor, &UA_TYPES[UA_TYPES_STRING]);
+        	UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10201), varStrSensor);
+        	UA_Variant_delete(varStrSensor);
+	}
+
+	// val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &OperatingTime, &UA_TYPES[UA_TYPES_INT16]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10202), val);
+        //UA_Variant_delete(val);
+
+        varStrWarningMessage = UA_Variant_new();
+	if (varStrWarningMessage!=NULL)
+	{
+		UA_String tmpWarningMessage = UA_STRING(WarningMessage);
+        	UA_Variant_setScalarCopy(varStrWarningMessage, &tmpWarningMessage, &UA_TYPES[UA_TYPES_STRING]);
+        	UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10203), varStrWarningMessage);
+        	UA_Variant_delete(varStrWarningMessage);
+	}
+
+	//--
+	//printf("10300\n");
+	//val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &IgramPP, &UA_TYPES[UA_TYPES_FLOAT]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10301), val);
+        //UA_Variant_delete(val);
+
+        //val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &IgramDC, &UA_TYPES[UA_TYPES_FLOAT]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10302), val);
+        //UA_Variant_delete(val);
+
+        //val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &LaserPP, &UA_TYPES[UA_TYPES_FLOAT]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10303), val);
+        //UA_Variant_delete(val);
+
+        //val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &LaserDC, &UA_TYPES[UA_TYPES_FLOAT]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10304), val);
+        //UA_Variant_delete(val);
+
+        //val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &SingleBeamAt900, &UA_TYPES[UA_TYPES_FLOAT]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10305), val);
+        //UA_Variant_delete(val);
+
+        //val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &SingleBeamAt2500, &UA_TYPES[UA_TYPES_FLOAT]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10306), val);
+        //UA_Variant_delete(val);
+
+        //val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &SignalToNoiseAt2500, &UA_TYPES[UA_TYPES_INT16]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10307), val);
+        //UA_Variant_delete(val);
+
+        //val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &CenterBurstLocation, &UA_TYPES[UA_TYPES_FLOAT]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10308), val);
+        //UA_Variant_delete(val);
+
+        //val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &DetectorTemp, &UA_TYPES[UA_TYPES_FLOAT]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10309), val);
+        //UA_Variant_delete(val);
+
+        //val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &LaserFrequency, &UA_TYPES[UA_TYPES_FLOAT]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10310), val);
+        //UA_Variant_delete(val);
+
+        //val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &HardDriveSpace, &UA_TYPES[UA_TYPES_INT16]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10311), val);
+        //UA_Variant_delete(val);
+
+        //val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &Flow, &UA_TYPES[UA_TYPES_FLOAT]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10312), val);
+        //UA_Variant_delete(val);
+
+        //val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &Temperature, &UA_TYPES[UA_TYPES_FLOAT]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10313), val);
+        //UA_Variant_delete(val);
+
+        //val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &Pressure, &UA_TYPES[UA_TYPES_FLOAT]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10314), val);
+        //UA_Variant_delete(val);
+
+        //val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &TempOptics, &UA_TYPES[UA_TYPES_FLOAT]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10315), val);
+        //UA_Variant_delete(val);
+
+        //val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &BadScanCounter, &UA_TYPES[UA_TYPES_INT16]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10316), val);
+        //UA_Variant_delete(val);
+
+        //val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &FreeMemorySpace, &UA_TYPES[UA_TYPES_INT16]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10317), val);
+        //UA_Variant_delete(val);
+
+        varStrLABFilename = UA_Variant_new();
+        if (varStrLABFilename!=NULL)
+        {
+                UA_String tmpLABFilename = UA_STRING(LABFilename);
+                UA_Variant_setScalarCopy(varStrLABFilename, &tmpLABFilename, &UA_TYPES[UA_TYPES_STRING]);
+                UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10318), varStrLABFilename);
+                UA_Variant_delete(varStrLABFilename);
+        }
+
+        varStrLOGFilename = UA_Variant_new();
+	if (varStrLOGFilename!=NULL)
+	{
+		UA_String tmpLOGFilename = UA_STRING(LOGFilename);
+        	UA_Variant_setScalarCopy(varStrLOGFilename, &tmpLOGFilename, &UA_TYPES[UA_TYPES_STRING]);
+        	UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10319), varStrLOGFilename);
+        	UA_Variant_delete(varStrLOGFilename);
+	}
+
+        varStrLgFilename = UA_Variant_new();
+	if (varStrLgFilename!=NULL)
+	{
+		UA_String tmpLgFilename = UA_STRING(LgFilename);
+        	UA_Variant_setScalarCopy(varStrLgFilename, &tmpLgFilename, &UA_TYPES[UA_TYPES_STRING]);
+        	UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10320), varStrLgFilename);
+        	UA_Variant_delete(varStrLgFilename);
+	}
+
+        varStrSecondLgFilename = UA_Variant_new();
+	if (varStrSecondLgFilename!=NULL)
+	{
+		UA_String tmpSecondLgFilename = UA_STRING(SecondLgFilename);
+        	UA_Variant_setScalarCopy(varStrSecondLgFilename, &tmpSecondLgFilename, &UA_TYPES[UA_TYPES_STRING]);
+        	UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10321), varStrSecondLgFilename);
+        	UA_Variant_delete(varStrSecondLgFilename);
+	}
+
+        //val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &SystemCounter, &UA_TYPES[UA_TYPES_FLOAT]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10322), val);
+        //UA_Variant_delete(val);
+
+        //val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &DetectorCounter, &UA_TYPES[UA_TYPES_FLOAT]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10323), val);
+        //UA_Variant_delete(val);
+
+        //val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &LaserCounter, &UA_TYPES[UA_TYPES_FLOAT]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10324), val);
+        //UA_Variant_delete(val);
+
+        //val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &FlowPumpCounter, &UA_TYPES[UA_TYPES_FLOAT]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10325), val);
+        //UA_Variant_delete(val);
+
+        //val = UA_Variant_new();
+        UA_Variant_setScalarCopy(val, &DesiccantCounter, &UA_TYPES[UA_TYPES_FLOAT]);
+        UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10326), val);
+        //UA_Variant_delete(val);
+
+	//--
+	printf("In run_UA_Client() : 10400\n"); // Data Subtree
+	printf("Update UA Address space : Data->Alarms : 10401 : %d\n", NoOfAlarms); // Alarms subtree
+	UA_Variant_setScalarCopy(val, &NoOfAlarms, &UA_TYPES[UA_TYPES_INT16]);		// eg <Alarms>2</Alarms>
+	UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 10401), val);	// somehow UAExpert cannot see updates to <1. Alarms>
+
+	// process in a loop iteration based on the value extracted from val;
+        varStrAlarms = UA_Variant_new();
+        if (varStrAlarms!=NULL) //if (varStrAlarms!=NULL)
+        {
+		//UA_Variant NoOfAlarmIterations;
+		int AlarmIterator=NoOfAlarms;	// line 926
+		UA_StatusCode retval;
+
+                //UA_String tmpAlarms = UA_STRING(Alarms);
+                //UA_Variant_setScalarCopy(varStrAlarms, &, &UA_TYPES[UA_TYPES_INT16]);
+                //UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 20001), varStrAlarms);
+                //UA_Variant_delete(varStrAlarms);
+
+		// extract the number of Alarm Nodes (from extract_from_xml
+		retval = UA_Client_readValueAttribute(uaClient, UA_NODEID_NUMERIC(1,10401), varStrAlarms);
+		if(retval == UA_STATUSCODE_GOOD && UA_Variant_hasScalarType(varStrAlarms, &UA_TYPES[UA_TYPES_INT16])) 
+		{
+        		//UA_DateTime raw_date = *(UA_DateTime *) value.data;
+			UA_Int16 raw_data = *(UA_Int16 *)varStrAlarms->data;
+			AlarmIterator = raw_data;
+			printf("AlarmIterator value here is %d\n", AlarmIterator);
+		}
+
+		for (int i=0; i<AlarmIterator; i++)
+		{
+			if (arrayOfAlarm == NULL)
+			{
+				printf("1064 : Fatal error : arrayOfAlarm not does exist\n");
+				exit(-1);
+			}
+			//arrayOfAlarm[i] = malloc(sizeof(AlarmStruct));
+
+			char Alarmstr[255], Tagstr[255], Namestr[255], Probabilitystr[255], CASnumberstr[255], Concentrationstr[255];
+
+			// create a new node under <Data->Alarm_(i)>; start with NodeID=20001 : need to differentiate between more than 1 Alarm segments
+                        // Add objectnode to represent Airgard->data->Alarm_(i)
+                        //shift before FOR : UA_NodeId r3_airgard_data_Alarm_Id;
+			printf("982 creating node Data->Alarm-%d \n",i+1);
+
+			UA_NodeId r3_airgard_data_Alarm_Id;	/* get the nodeid assigned by the server */
+                        UA_ObjectAttributes oAttr_r3_data_Alarm_Info = UA_ObjectAttributes_default;
+			sprintf(Alarmstr,"AlarmInfo-%d", i+1);
+                        oAttr_r3_data_Alarm_Info.description = UA_LOCALIZEDTEXT("en-US", Alarmstr);
+			sprintf(Alarmstr,"Alarm-%d", i+1);
+                        oAttr_r3_data_Alarm_Info.displayName = UA_LOCALIZEDTEXT("en-US", Alarmstr);
+                        //UA_Server_addObjectNode(server, UA_NODEID_NUMERIC(1, 20000+i),		// 20000 series
+
+			UA_Server_addObjectNode(server, UA_NODEID_STRING(1, Alarmstr),
+			                r2_airgard_data_Id,				// line 953: only this is special as the address is pass in]
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_HASSUBTYPE),
+                                        UA_QUALIFIEDNAME(1, Alarmstr),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEOBJECTTYPE),
+                                        oAttr_r3_data_Alarm_Info, NULL, &r3_airgard_data_Alarm_Id);
+
+		//
+					//printf("creating node Data->Alarm-%d:Tag-%d\n", i+1,i+1);
+                        	UA_VariableAttributes vTagAttr = UA_VariableAttributes_default;	sprintf(Tagstr,"Alarm:TagInfo-%d",i+1);
+				vTagAttr.description = UA_LOCALIZEDTEXT("en-US", Tagstr); sprintf(Tagstr,"1. Tag-%d",i+1);
+				vTagAttr.displayName = UA_LOCALIZEDTEXT("en-US", Tagstr);
+                        	vTagAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                        	UA_String AlarmTag[255];
+				UA_Variant_setArray(&vTagAttr.value, &AlarmTag, 255, &UA_TYPES[UA_TYPES_STRING]); sprintf(Tagstr,"A%d:Tag",i+1);
+
+				/**/	//printf("At Tag section, r3_airgard_data_Alarm_Id :%d\n", r3_airgard_data_Alarm_Id);
+				UA_Server_addVariableNode(server, UA_NODEID_STRING_ALLOC(1, Tagstr),
+							r3_airgard_data_Alarm_Id,
+			    				UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        		UA_QUALIFIEDNAME(1, Tagstr),
+                                        		UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                        		vTagAttr, NULL, NULL);
+					//printf("Successfully create new <Tag> variable node : Alarm-%d:Tag-%d \n",i+1,i+1);
+				/**/
+		//-- line 1027
+					//printf("1029 creating node Data->Alarm-%d:Name-%d \n",i+1,i+1);
+				UA_VariableAttributes vNameAttr = UA_VariableAttributes_default; sprintf(Namestr,"Alarm:NameInfo-%d",i+1);
+				vNameAttr.description = UA_LOCALIZEDTEXT("en-US", Namestr); sprintf(Namestr,"2. Name-%d",i+1);
+				vNameAttr.displayName = UA_LOCALIZEDTEXT("en-US", Namestr);
+				vNameAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+				UA_String AlarmName[255];
+				UA_Variant_setArray(&vNameAttr.value, &AlarmName, 255, &UA_TYPES[UA_TYPES_STRING]); sprintf(Namestr,"A%d:Name",i+1);
+
+				/**/	//printf("At Name section, r3_airgard_data_Alarm_Id :%d\n", r3_airgard_data_Alarm_Id);
+				UA_Server_addVariableNode(server, UA_NODEID_STRING_ALLOC(1, Namestr),
+							r3_airgard_data_Alarm_Id,
+                                        		UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        		UA_QUALIFIEDNAME(1, Namestr),
+                                        		UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                        		vNameAttr, NULL, NULL);
+					//printf("Successfully create new <Name> variable node : Alarm-%d:Name-%d \n",i+1,i+1);
+				/**/
+		//--
+					//printf("1046 creating node Data->Alarm-%d:Probability-%d \n", i+1,i+1);
+	                        UA_VariableAttributes vProbabilityAttr = UA_VariableAttributes_default; sprintf(Probabilitystr,"Alarm:ProbabilityInfo-%d",i+1);
+                	        vProbabilityAttr.description = UA_LOCALIZEDTEXT("en-US", Probabilitystr); sprintf(Probabilitystr,"3. Probability-%d",i+1);
+        	                vProbabilityAttr.displayName = UA_LOCALIZEDTEXT("en-US", Probabilitystr);
+                	        vProbabilityAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+	                        UA_Float AlarmProbability;
+        	                UA_Variant_setScalar(&vProbabilityAttr.value, &AlarmProbability, &UA_TYPES[UA_TYPES_FLOAT]); sprintf(Probabilitystr,"A%d:Probability",i+1);
+
+					//printf("At Probability section, r3_airgard_data_Alarm_Id :%d\n", r3_airgard_data_Alarm_Id);
+   	                        UA_Server_addVariableNode(server, UA_NODEID_STRING_ALLOC(1, Probabilitystr),
+                                        		r3_airgard_data_Alarm_Id,
+                                        		UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        		UA_QUALIFIEDNAME(1, Probabilitystr),
+                                        		UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                        		vProbabilityAttr, NULL, NULL);
+                        		//printf("Successfully create new <Probability> variable node : Alarm-%d:Probability-%d \n",i+1,i+1);
+
+		//--
+					//printf("creating node Data->Alarm-%d:CASnumber-%d \n",i+1,i+1);
+	                        UA_VariableAttributes vCASnumberAttr = UA_VariableAttributes_default; sprintf(CASnumberstr,"Alarm:CASnumberInfo-%d",i+1);
+                	        vCASnumberAttr.description = UA_LOCALIZEDTEXT("en-US", CASnumberstr); sprintf(CASnumberstr,"4. CASnumber-%d",i+1);
+                        	vCASnumberAttr.displayName = UA_LOCALIZEDTEXT("en-US", CASnumberstr);
+	                        vCASnumberAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+        	                UA_String AlarmCASnumber[255];
+                	        UA_Variant_setArray(&vCASnumberAttr.value, &AlarmCASnumber, 255, &UA_TYPES[UA_TYPES_STRING]); sprintf(CASnumberstr,"A%d:CASnumber",i+1);
+
+					//printf("At CASnumber section, r3_airgard_data_Alarm_Id :%d\n", r3_airgard_data_Alarm_Id);
+				/*1156*/UA_Server_addVariableNode(server, UA_NODEID_STRING_ALLOC(1, CASnumberstr),
+                                        		r3_airgard_data_Alarm_Id,
+                                        		UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        		UA_QUALIFIEDNAME(1, CASnumberstr),
+                                        		UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                        		vNameAttr, NULL, NULL);	// vCASnumberAttr is the cause of the crash here; temporary replaced by vNameAttr
+				/**/
+                       			printf("Successfully create new <CASnumber> variable node : Alarm-%d:CASnumber-%d \n",i+1,i+1);
+
+		//--
+					//printf("creating node Data->Alarm-%d:Concentration-%d \n", i+1,i+1);
+	                        UA_VariableAttributes vConcentrationAttr = UA_VariableAttributes_default; sprintf(Concentrationstr,"Alarm:ConcentrationInfo-%d",i+1);
+                	        vConcentrationAttr.description = UA_LOCALIZEDTEXT("en-US", Concentrationstr); sprintf(Concentrationstr,"5. Concentration-%d",i+1);
+        	                vConcentrationAttr.displayName = UA_LOCALIZEDTEXT("en-US", Concentrationstr);
+                	        vConcentrationAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+	                        UA_Int16 AlarmConcentration;
+        	                UA_Variant_setScalar(&vConcentrationAttr.value, &AlarmConcentration, &UA_TYPES[UA_TYPES_INT16]);sprintf(Concentrationstr,"A%d:Concentration",i+1);
+
+                        		//printf("At Concentration section, r3_airgard_data_Alarm_Id :%d\n", r3_airgard_data_Alarm_Id);
+				UA_Server_addVariableNode(server, UA_NODEID_STRING_ALLOC(1, Concentrationstr),
+                                        		r3_airgard_data_Alarm_Id,
+                                        		UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        		UA_QUALIFIEDNAME(1, Concentrationstr),
+                                        		UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                        		vConcentrationAttr, NULL, NULL);
+            	            		//printf("Successfully create new <Concentration> variable node : Alarm-%d:Concentration-%d \n",i+1,i+1);
+
+		//--
+			printf("Alarm info to be updated to OPCUA Address space : \n");
+			printf("Tag		: %s \n", arrayOfAlarm[i].Tag);
+			printf("Name		: %s \n", arrayOfAlarm[i].Name);
+			printf("Probability 	: %f \n", arrayOfAlarm[i].Probability);
+			printf("CASnumber	: %s \n", arrayOfAlarm[i].CASnumber);
+			printf("Concentration	: %d \n", arrayOfAlarm[i].Concentration);
+
+			// finally write Alarm subnodes to UA address space
+
+                        varStrAlarmTag = UA_Variant_new();
+			if (varStrAlarmTag!=NULL)
+			{
+				UA_String tmpAlarmTag = UA_STRING(arrayOfAlarm[i].Tag);
+                        	UA_Variant_setScalarCopy(varStrAlarmTag, &tmpAlarmTag, &UA_TYPES[UA_TYPES_STRING]);
+                        	UA_Client_writeValueAttribute(uaClient, UA_NODEID_STRING(1, Tagstr), varStrAlarmTag);
+                        	UA_Variant_delete(varStrAlarmTag);
+			}
+
+                        varStrAlarmName = UA_Variant_new();
+			if (varStrAlarmName!=NULL)
+			{
+				UA_String tmpAlarmName = UA_STRING(arrayOfAlarm[i].Name);
+                        	UA_Variant_setScalarCopy(varStrAlarmName, &tmpAlarmName, &UA_TYPES[UA_TYPES_STRING]);
+                        	UA_Client_writeValueAttribute(uaClient, UA_NODEID_STRING(1, Namestr), varStrAlarmName);
+                        	UA_Variant_delete(varStrAlarmName);
+			}
+
+			AlarmProbability = arrayOfAlarm[i].Probability;
+                        UA_Variant_setScalarCopy(val, &AlarmProbability, &UA_TYPES[UA_TYPES_FLOAT]);
+                        UA_Client_writeValueAttribute(uaClient, UA_NODEID_STRING(1, Probabilitystr), val);
+
+			varStrAlarmCASnumber = UA_Variant_new();
+			if (varStrAlarmCASnumber!=NULL)
+			{/*1217*/
+				UA_String tmpAlarmCASnumber = UA_STRING(arrayOfAlarm[i].CASnumber);
+                        	UA_Variant_setScalarCopy(varStrAlarmCASnumber, &tmpAlarmCASnumber, &UA_TYPES[UA_TYPES_STRING]);
+                        	UA_Client_writeValueAttribute(uaClient, UA_NODEID_STRING(1, CASnumberstr), varStrAlarmCASnumber);
+				UA_Variant_delete(varStrAlarmCASnumber);
+			}
+
+			AlarmConcentration = arrayOfAlarm[i].Concentration;
+        		UA_Variant_setScalarCopy(val, &AlarmConcentration, &UA_TYPES[UA_TYPES_INT16]);
+        		UA_Client_writeValueAttribute(uaClient, UA_NODEID_STRING(1, Concentrationstr), val);
+
+
+			//printf("wait for keystroke : <check UAexpert for values Probabilitystr and Concentrationstr\n");
+			//In for loop scanf("%s", &mystring);
+			//sleep(2);
+		}
+        }
+
+        // process in a loop iteration based on the value extracted from val;
+        varStrNonAlarms = UA_Variant_new();
+        if (varStrNonAlarms!=NULL) //if (varStrNonAlarms!=NULL)
+        {
+                //UA_Variant NoOfAlarmIterations;
+                int NonAlarmIterator=NoOfNonAlarms;   // line 926
+                UA_StatusCode retval;
+
+                //UA_String tmpAlarms = UA_STRING(Alarms);
+                //UA_Variant_setScalarCopy(varStrAlarms, &, &UA_TYPES[UA_TYPES_INT16]);
+                //UA_Client_writeValueAttribute(uaClient, UA_NODEID_NUMERIC(1, 20001), varStrAlarms);
+                //UA_Variant_delete(varStrAlarms);
+
+                // extract the number of Non Alarm Nodes (from extract_from_xml
+                retval = UA_Client_readValueAttribute(uaClient, UA_NODEID_NUMERIC(1,10402), varStrNonAlarms);
+                if(retval == UA_STATUSCODE_GOOD && UA_Variant_hasScalarType(varStrNonAlarms, &UA_TYPES[UA_TYPES_INT16]))
+                {
+                        //UA_DateTime raw_date = *(UA_DateTime *) value.data;
+                        UA_Int16 raw_data = *(UA_Int16 *)varStrNonAlarms->data;
+                        NonAlarmIterator = raw_data;
+                        printf("NonAlarmIterator value here is %d\n", NonAlarmIterator);
+                }
+
+                for (int i=0; i<NonAlarmIterator; i++)
+                {
+                        if (arrayOfNonAlarm == NULL)
+                        {
+                                printf("1360 : Fatal error : arrayOfNonAlarm not does exist\n");
+                                exit(-1);
+                        }
+                        //arrayOfAlarm[i] = malloc(sizeof(AlarmStruct));
+
+                        char NonAlarmstr[255], NonTagstr[255], NonNamestr[255], NonProbabilitystr[255], NonCASnumberstr[255], NonConcentrationstr[255];
+
+                        // create a new node under <Data->Alarm_(i)>; start with NodeID=20001 : need to differentiate between more than 1 Alarm segments
+                        // Add objectnode to represent Airgard->data->Alarm_(i)
+                        //shift before FOR : UA_NodeId r3_airgard_data_Alarm_Id;
+                        printf("1370 creating node Data->NonAlarm-%d \n",i+1);
+
+                        UA_NodeId r3_airgard_data_NonAlarm_Id;     /* get the nodeid assigned by the server */
+                        UA_ObjectAttributes oAttr_r3_data_NonAlarm_Info = UA_ObjectAttributes_default;
+                        sprintf(NonAlarmstr,"NonAlarmInfo-%d", i+1);
+                        oAttr_r3_data_NonAlarm_Info.description = UA_LOCALIZEDTEXT("en-US", NonAlarmstr);
+                        sprintf(NonAlarmstr,"NonAlarm-%d", i+1);
+                        oAttr_r3_data_NonAlarm_Info.displayName = UA_LOCALIZEDTEXT("en-US", NonAlarmstr);
+                        //UA_Server_addObjectNode(server, UA_NODEID_NUMERIC(1, 20000+i),                // 20000 series
+
+                        UA_Server_addObjectNode(server, UA_NODEID_STRING(1, NonAlarmstr),
+                                        r2_airgard_data_Id,                             // line 1381: only this is special as the address is pass in]
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_HASSUBTYPE),
+                                        UA_QUALIFIEDNAME(1, NonAlarmstr),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEOBJECTTYPE),
+                                        oAttr_r3_data_NonAlarm_Info, NULL, &r3_airgard_data_NonAlarm_Id);
+
+                //
+                                        //printf("creating node Data->NonAlarm-%d:Tag-%d\n", i+1,i+1);
+                                UA_VariableAttributes vNonTagAttr = UA_VariableAttributes_default; sprintf(NonTagstr,"NonAlarm:TagInfo-%d",i+1);
+                                vNonTagAttr.description = UA_LOCALIZEDTEXT("en-US", NonTagstr); sprintf(NonTagstr,"1. Tag-%d",i+1);
+                                vNonTagAttr.displayName = UA_LOCALIZEDTEXT("en-US", NonTagstr);
+                                vNonTagAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                                UA_String NonTag[255];
+                                UA_Variant_setArray(&vNonTagAttr.value, &NonTag, 255, &UA_TYPES[UA_TYPES_STRING]); sprintf(NonTagstr,"NA%d:Tag",i+1);
+
+                                /**/    //printf("At Tag section, r3_airgard_data_NonAlarm_Id :%d\n", r3_airgard_data_NonAlarm_Id);
+                                UA_Server_addVariableNode(server, UA_NODEID_STRING_ALLOC(1, NonTagstr),
+                                                        r3_airgard_data_NonAlarm_Id,
+                                                        UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                                        UA_QUALIFIEDNAME(1, NonTagstr),
+                                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                                        vNonTagAttr, NULL, NULL);
+                                        //printf("Successfully create new <Tag> variable node : NonAlarm-%d:Tag-%d \n",i+1,i+1);
+                                /**/
+               //-- line 1404
+                                        //printf("1405 creating node Data->NonAlarm-%d:Name-%d \n",i+1,i+1);
+                                UA_VariableAttributes vNonNameAttr = UA_VariableAttributes_default; sprintf(NonNamestr,"NonAlarm:NameInfo-%d",i+1);
+                                vNonNameAttr.description = UA_LOCALIZEDTEXT("en-US", NonNamestr); sprintf(NonNamestr,"2. Name-%d",i+1);
+                                vNonNameAttr.displayName = UA_LOCALIZEDTEXT("en-US", NonNamestr);
+                                vNonNameAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                                UA_String NonName[255];
+                                UA_Variant_setArray(&vNonNameAttr.value, &NonName, 255, &UA_TYPES[UA_TYPES_STRING]); sprintf(NonNamestr,"NA%d:Name",i+1);
+
+                                /**/    //printf("At Name section, r3_airgard_data_NonAlarm_Id :%d\n", r3_airgard_data_NonAlarm_Id);
+                                UA_Server_addVariableNode(server, UA_NODEID_STRING_ALLOC(1, NonNamestr),
+                                                        r3_airgard_data_NonAlarm_Id,
+                                                        UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                                        UA_QUALIFIEDNAME(1, NonNamestr),
+                                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                                        vNonNameAttr, NULL, NULL);
+                                        //printf("Successfully create new <Name> variable node : NonAlarm-%d:Name-%d \n",i+1,i+1);
+                                /**/
+                //--
+                                        //printf("1423 creating node Data->NonAlarm-%d:Probability-%d \n", i+1,i+1);
+                                UA_VariableAttributes vNonProbabilityAttr = UA_VariableAttributes_default; sprintf(NonProbabilitystr,"NonAlarm:ProbabilityInfo-%d",i+1);
+                                vNonProbabilityAttr.description = UA_LOCALIZEDTEXT("en-US", NonProbabilitystr); sprintf(NonProbabilitystr,"3. Probability-%d",i+1);
+                                vNonProbabilityAttr.displayName = UA_LOCALIZEDTEXT("en-US", NonProbabilitystr);
+                                vNonProbabilityAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                                UA_Float NonProbability;
+                                UA_Variant_setScalar(&vNonProbabilityAttr.value, &NonProbability, &UA_TYPES[UA_TYPES_FLOAT]); sprintf(NonProbabilitystr,"NA%d:Probability",i+1);
+
+                                        //printf("At Probability section, r3_airgard_data_NonAlarm_Id :%d\n", r3_airgard_data_Alarm_Id);
+                                UA_Server_addVariableNode(server, UA_NODEID_STRING_ALLOC(1, NonProbabilitystr),
+                                                        r3_airgard_data_NonAlarm_Id,
+                                                        UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                                        UA_QUALIFIEDNAME(1, NonProbabilitystr),
+                                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                                        vNonProbabilityAttr, NULL, NULL);
+                                        //printf("Successfully create new <Probability> variable node : NonAlarm-%d:Probability-%d \n",i+1,i+1);
+
+                //--
+                                        //printf("creating node Data->NonAlarm-%d:CASnumber-%d \n",i+1,i+1);
+                                UA_VariableAttributes vNonCASnumberAttr = UA_VariableAttributes_default; sprintf(NonCASnumberstr,"NonAlarm:CASnumberInfo-%d",i+1);
+                                vNonCASnumberAttr.description = UA_LOCALIZEDTEXT("en-US", NonCASnumberstr); sprintf(NonCASnumberstr,"4. CASnumber-%d",i+1);
+                                vNonCASnumberAttr.displayName = UA_LOCALIZEDTEXT("en-US", NonCASnumberstr);
+                                vNonCASnumberAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                                UA_String NonCASnumber[255];
+                                UA_Variant_setArray(&vNonCASnumberAttr.value, &NonCASnumber, 255, &UA_TYPES[UA_TYPES_STRING]); sprintf(NonCASnumberstr,"NA%d:CASnumber",i+1);
+
+                                        //printf("At CASnumber section, r3_airgard_data_NonAlarm_Id :%d\n", r3_airgard_data_NonAlarm_Id);
+                                /*1156*/UA_Server_addVariableNode(server, UA_NODEID_STRING_ALLOC(1, NonCASnumberstr),
+                                                        r3_airgard_data_NonAlarm_Id,
+                                                        UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                                        UA_QUALIFIEDNAME(1, NonCASnumberstr),
+                                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                                        vNonNameAttr, NULL, NULL); // vCASnumberAttr is the cause of the crash here; temporary replaced by vNonNameAttr
+                                /**/
+                //--
+                                        //printf("creating node Data->NonAlarm-%d:Concentration-%d \n", i+1,i+1);
+                                UA_VariableAttributes vNonConcentrationAttr = UA_VariableAttributes_default; sprintf(NonConcentrationstr,"NonAlarm:ConcentrationInfo-%d",i+1);
+                                vNonConcentrationAttr.description = UA_LOCALIZEDTEXT("en-US", NonConcentrationstr); sprintf(NonConcentrationstr,"5. Concentration-%d",i+1);
+                                vNonConcentrationAttr.displayName = UA_LOCALIZEDTEXT("en-US", NonConcentrationstr);
+                                vNonConcentrationAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                                UA_Int16 NonConcentration;
+                                UA_Variant_setScalar(&vNonConcentrationAttr.value, &NonConcentration, &UA_TYPES[UA_TYPES_INT16]);sprintf(NonConcentrationstr,"NA%d:Concentration",i+1);
+
+                                        //printf("At Concentration section, r3_airgard_data_NonAlarm_Id :%d\n", r3_airgard_data_NonAlarm_Id);
+                                UA_Server_addVariableNode(server, UA_NODEID_STRING_ALLOC(1, NonConcentrationstr),
+                                                        r3_airgard_data_NonAlarm_Id,
+                                                        UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                                        UA_QUALIFIEDNAME(1, NonConcentrationstr),
+                                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                                        vNonConcentrationAttr, NULL, NULL);
+                                        //printf("Successfully create new <Concentration> variable node : NonAlarm-%d:Concentration-%d \n",i+1,i+1);
+
+                //--
+                        printf("NonAlarm info to be updated to OPCUA Address space : \n");
+                        printf("Tag             : %s \n", arrayOfNonAlarm[i].Tag);
+                        printf("Name            : %s \n", arrayOfNonAlarm[i].Name);
+                        printf("Probability     : %f \n", arrayOfNonAlarm[i].Probability);
+                        printf("CASnumber       : %s \n", arrayOfNonAlarm[i].CASnumber);
+                        printf("Concentration   : %d \n", arrayOfNonAlarm[i].Concentration);
+
+                        // finally write NonAlarm subnodes to UA address space
+                        varStrNonAlarmTag = UA_Variant_new();
+                        if (varStrNonAlarmTag!=NULL)
+                        {
+                                UA_String tmpNonAlarmTag = UA_STRING(arrayOfNonAlarm[i].Tag);
+                                UA_Variant_setScalarCopy(varStrNonAlarmTag, &tmpNonAlarmTag, &UA_TYPES[UA_TYPES_STRING]);
+                                UA_Client_writeValueAttribute(uaClient, UA_NODEID_STRING(1, NonTagstr), varStrNonAlarmTag);
+                                UA_Variant_delete(varStrNonAlarmTag);
+                        }
+
+                        varStrNonAlarmName = UA_Variant_new();
+                        if (varStrNonAlarmName!=NULL)
+                        {
+                                UA_String tmpNonAlarmName = UA_STRING(arrayOfNonAlarm[i].Name);
+                                UA_Variant_setScalarCopy(varStrNonAlarmName, &tmpNonAlarmName, &UA_TYPES[UA_TYPES_STRING]);
+                                UA_Client_writeValueAttribute(uaClient, UA_NODEID_STRING(1, NonNamestr), varStrNonAlarmName);
+                                UA_Variant_delete(varStrNonAlarmName);
+                        }
+
+                        NonProbability = arrayOfNonAlarm[i].Probability;
+                        UA_Variant_setScalarCopy(val, &NonProbability, &UA_TYPES[UA_TYPES_FLOAT]);
+                        UA_Client_writeValueAttribute(uaClient, UA_NODEID_STRING(1, NonProbabilitystr), val);
+
+                        varStrNonAlarmCASnumber = UA_Variant_new();
+                        if (varStrNonAlarmCASnumber!=NULL)
+                        {/*1508*/
+                                UA_String tmpNonAlarmCASnumber = UA_STRING(arrayOfNonAlarm[i].CASnumber);
+                                UA_Variant_setScalarCopy(varStrNonAlarmCASnumber, &tmpNonAlarmCASnumber, &UA_TYPES[UA_TYPES_STRING]);
+                                UA_Client_writeValueAttribute(uaClient, UA_NODEID_STRING(1, NonCASnumberstr), varStrNonAlarmCASnumber);
+                                UA_Variant_delete(varStrNonAlarmCASnumber);
+                        }
+
+                        NonConcentration = arrayOfAlarm[i].Concentration;
+                        UA_Variant_setScalarCopy(val, &NonConcentration, &UA_TYPES[UA_TYPES_INT16]);
+                        UA_Client_writeValueAttribute(uaClient, UA_NODEID_STRING(1, NonConcentrationstr), val);
+
+                        //printf("wait for keystroke : <check UAexpert for values Probabilitystr and Concentrationstr\n");
+                        //In for loop scanf("%s", &mystring);
+                        //sleep(2);
+
+		}
+	}
+
+	if (val!=NULL)
+		UA_Variant_delete(val);
+
+	printf("after UA_Variant_delete(val)\n");
+
+/*
+	if (uaClient !=NULL)
+	{
+		UA_Client_disconnectSecureChannel(uaClient);
+		free(uaClient);
+	}
+	printf("after free(uaClient)\n");
+*/
+
+} // End run_UA_Client()
+
+
+//int ConnectToAirgard(int argc, char **argv)
+void *ConnectToAirgard(void *x_void_ptr)
+{
+	// Airgard subtree (root node)
+	char XMLSoftwareVersion[255];
+	char XMLDataBlockVersion[255];
+
+	// TimeStamp subtree
+	char XMLInstrumentTime[255];
+	char XMLMeasurementTime[255];
+
+	// StatusInfo subtree
+	char XMLBootStatus[255];
+	char XMLSnapshotStatus[255];
+	char XMLSCPStatus[255];
+	char XMLSFTPStatus[255];
+	char XMLRunScriptStatus[255];
+	char XMLArchiveStatus[255];
+	char XMLAnciliarySensorStatus;
+
+	// Status subtree
+	char XMLSensor[255];
+	int XMLOperatingTime = 0;
+	char XMLWarningMessage[255];
+
+	// Diagnostics subtree
+        //float XMLIgramPP = 0.0;
+        //float XMLIgramDC = 0.0;
+	//float XMLLaserPP = 0.0;
+	//float XMLLaserDC = 0.0;
+
+	float XMLSingleBeamAt900 = 0.0;
+	float XMLSingleBeamAt2500 = 0.0;
+	int XMLSignalToNoiseRatioAt2500 = 0;
+	float XMLCentreBurstLocation = 0.0;
+	float XMLDetectorTemp = 0.0;
+	float XMLLaserFrequency = 0.0;
+	int XMLHardDriveSpace = 0;
+	int XMLFlow = 0;
+	int XMLTemperature = 0;
+	float XMLPressure = 0.0;
+	float XMLTempOptics = 0.0;
+	int XMLBadScanCounter = 0;
+	int XMLFreeMemorySpace = 0;
+	char XMLLABFilename[255];
+	char XMLLOGFilename[255];
+	char XMLLgFilename[255];
+	char XMLSecondLgFilename[255];
+	float XMLSystemCounter = 0.0;
+	float XMLDetectorCounter = 0.0;
+	float XMLLaserCounter = 0.0;
+	float XMLFlowPumpCounter = 0.0;
+	float XMLDesiccantCounter = 0.0;
+
+	// Data subtree
+	int XMLAlarms = 0;
+	int XMLNonAlarms = 0;
+
+        int numbytes;
+        char buffer[MAX_BUFFER_SIZE];
+        struct hostent *he;
+        struct sockaddr_in airgard_addr_data;        /* connector's address information */
+	struct sockaddr_in airgard_addr_cmd;		// structures for handling internet addresses - sockaddr_in, struct in_addr
+	int counter = 0;
+
+	// need to declare UA_NodeId r2_data_airgard_Id here so as to pass by reference to run_client_setup()
+	UA_NodeId r2_airgard_data_Id; // line 1143 move it to global space
+
+        //if (( he=gethostbyname(g_argv[1])) == NULL) /* get the host info */
+        //if (( he=gethostbyname("192.168.2.88")) == NULL)
+
+	// opening port 20004 for reading the streams from Airgard
+	printf("In ConnectToAirgard thread (reading streams) : ip = %s, port = %d\n", g_argv_ip, g_argv_port);
+
+	UA_Server *server = (UA_Server *)x_void_ptr;
+
+        if (( he=gethostbyname(g_argv_ip)) == NULL)
+	{
+                herror("gethostbyname");
+                exit(-1);
+        }
+
+        if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+        {
+                perror("socket : 20004 creation failed");
+                exit(-1);
+        }
+	else
+	{
+        	airgard_addr_data.sin_family = AF_INET;      /* host byte order */
+        	airgard_addr_data.sin_port = htons(PORT);    /* short, network byte order */
+        	airgard_addr_data.sin_addr = *((struct in_addr *) he-> h_addr);
+        	bzero(&(airgard_addr_data.sin_zero), 8);     /* zero the rest of the struct */
+
+        	if (connect(sockfd, (struct sockaddr *) &airgard_addr_data, sizeof(struct sockaddr)) < 0)
+        	{
+                	perror("connection : 20004 failed");
+                	exit(-1);
+        	}
+	}
+	//end opening port 20004 for incoming streams
+
+	// open another port 10004 for in/out streams
+        if ((command_sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+        {
+                perror("socket : 10004 creation failed");
+                exit(-1);
+        }
+	else
+	{
+		printf("====command_sockfd = %d =============\n", command_sockfd);
+		//sleep(2);
+
+        	airgard_addr_cmd.sin_family = AF_INET;      /* host byte order */
+        	airgard_addr_cmd.sin_port = htons(10004);    /* short, network byte order */
+        	airgard_addr_cmd.sin_addr = *((struct in_addr *) he-> h_addr);
+        	bzero(&(airgard_addr_cmd.sin_zero), 8);     /* zero the rest of the struct */
+
+        	if (connect(command_sockfd, (struct sockaddr *) &airgard_addr_cmd, sizeof(struct sockaddr)) < 0)
+        	{
+                	perror("connection : 10004 failed");
+                	exit(-1);
+        	}
+	}
+	// end opening port 10004
+
+        if (!UA_Nodes_Setup) // UA_Nodes only needs to be created the first time
+        {
+                UA_Nodes_Setup = true;
+
+		/* Create a rudimentary objectType
+		 *
+		 * BaseObjectType
+		 * |
+		 * + (V) SoftwareVersion
+		 * + (V) DataBlockVersion
+		 * +-(OT) TimestampType
+		 * |   + (V) InstrumentTime
+		 * |   + (V) MeasurementTime
+		 * +-(OT) StatusType
+		 * |   + (V) Sensor
+		 * |   + (V) OperatingTime
+		 * |   + (V) WarningMessage
+		 * |   +(OT) InfoType
+		 * |   |--+ (V) BootStatus
+		 * |   |  + (V) SnapshotStatus
+		 * |   |  + (V) SFTPStatus
+		 * |-(OT) DiagnosticsType
+		 * |   + (V) IgramPP
+		 * |   + (V) ...
+		 * |   + (V) DesiccantCounter
+		 * |-(OT) DataType (10400)
+		 * |   + (V) Alarms (20000)
+		 * |   + (OT) Alarm
+		 * |   |---+ (V) Tag
+		 * |   |   + (V) Name
+		 * |   |   + (V) Probability
+		 * |   |   + (V) CASnumber
+		 * |   |   + (V) Concentration
+		 * |   + (OT) Alarm
+		 * |   | <repeat>
+		 * |   + (V) NonAlarms (30000)
+		*/
+
+		printf("=====ConnectToAirgard() : In UA Nodes setup IF segment======================= \n");
+
+                        //Add a new namespace to the server
+                        UA_Int16 ns_MKS = UA_Server_addNamespace(server, "MKS");
+                        //UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "New Namespace added with Nr. %d \n", ns_MKS);
+
+                        // Add new object called Airgard Sensor
+                        UA_NodeId r1_airgardroot_Id;  /* get the nodeid assigned by the server */
+			//UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "---UA_NodeId = %d\n", r1_airgardroot_Id);
+
+                        UA_ObjectAttributes oAttr = UA_ObjectAttributes_default;
+                        UA_Server_addObjectNode(server, UA_NODEID_STRING(1, "AirGardSensor"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_OBJECTSFOLDER),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),		// original UA_NS0ID_ORGANIZES
+                                        UA_QUALIFIEDNAME(1, "AirGard"),
+					UA_NODEID_NUMERIC(0, UA_NS0ID_BASEOBJECTTYPE),		// this refers to the Object Type identifier
+                                        oAttr, NULL, &r1_airgardroot_Id);			// node id assigned by the server
+
+                        //UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+			//	"Root Node created : Airgard\n", r1_airgardroot_Id);		// OK
+
+		//***// Subtree: Airgard->Software Version (1,10000)
+
+			// variable
+                        UA_VariableAttributes vSoftwareVersionAttr = UA_VariableAttributes_default;
+			vSoftwareVersionAttr.description = UA_LOCALIZEDTEXT("en-US", "Software Version Info");
+			vSoftwareVersionAttr.displayName = UA_LOCALIZEDTEXT("en-US", "1. Software Version");
+                        vSoftwareVersionAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                        //UA_String SoftwareVersion = (UA_String) XMLSoftwareVersion;
+			UA_String SoftwareVersion[255];
+			//strcpy(SoftwareVersion, XMLSoftwareVersion);
+                        UA_Variant_setArray(&vSoftwareVersionAttr.value, &SoftwareVersion, 255, &UA_TYPES[UA_TYPES_STRING]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10001),		// NodeId
+                                        	r1_airgardroot_Id,				// parent NodeId
+						UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),	// parent Reference NodeId
+                                        	UA_QUALIFIEDNAME(1, "Software Version"),	// Qualified Name
+						UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+						vSoftwareVersionAttr, NULL, NULL);
+
+                        //UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+			//	"Attribute Variable created: Airgard->VersionType->SoftwareVersion\n", r1_airgardroot_Id);
+
+			// variable
+                        UA_VariableAttributes vDataBlockVersionAttr = UA_VariableAttributes_default;
+                        vDataBlockVersionAttr.description = UA_LOCALIZEDTEXT("en-US", "Data Block Version Info");
+                        vDataBlockVersionAttr.displayName = UA_LOCALIZEDTEXT("en-US", "2. Data Block Version");
+                        vDataBlockVersionAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                       //UA_String DataBlockVersion = (UA_String) XMLDataBlockVersion;
+			UA_String DataBlockVersion[255];
+			//strcpy(DataBlockVersion, XMLDataBlockVersion);
+                        UA_Variant_setArray(&vDataBlockVersionAttr.value, &DataBlockVersion, 255, &UA_TYPES[UA_TYPES_STRING]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1,10002),r1_airgardroot_Id,
+						UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        	UA_QUALIFIEDNAME(1, "2. Data Block Version"),
+						UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+						vDataBlockVersionAttr, NULL, NULL);
+
+                	//UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+			//	"Attribute Variable created: Airgard->VersionType->DataBlockVersion\n", r1_airgardroot_Id);
+
+		//***// Subtree: Airgard->Timestamp (1,10100)
+
+			// Add objectnode to represent Airgard->Timestamp
+			UA_NodeId r2_airgard_timestamp_Id;  /* get the nodeid assigned by the server */
+                        UA_ObjectAttributes oAttr_r2_timestamp = UA_ObjectAttributes_default;
+                        UA_Server_addObjectNode(server, UA_NODEID_STRING(1, "AirGardSensor_TimeStamp"),
+                                        r1_airgardroot_Id,			// Make Airgard node <Contains> Timestamp node		//UA_NODEID_NUMERIC(0, UA_NS0ID_OBJECTSFOLDER),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_HASSUBTYPE),
+                                        UA_QUALIFIEDNAME(1, "Timestamp"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEOBJECTTYPE),
+                                        oAttr_r2_timestamp, NULL, &r2_airgard_timestamp_Id);		// here
+
+                        //UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+                        //       "Object Node created : Airgard->Timestamp Node\n", r2_airgard_timestamp_Id);
+
+
+			// variable
+                        UA_VariableAttributes vInstrumentTimeAttr = UA_VariableAttributes_default;
+                        vInstrumentTimeAttr.description = UA_LOCALIZEDTEXT("en-US", "Instrument Time Info");
+                        vInstrumentTimeAttr.displayName = UA_LOCALIZEDTEXT("en-US", "1. Instrument Time");
+                        vInstrumentTimeAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                        //UA_String InstrumentTime = (UA_String) XMLInstrumentTime;
+                        UA_String InstrumentTime[255];
+                        //strcpy(InstrumenTime, XMLInstrumentTIme);
+                        UA_Variant_setArray(&vInstrumentTimeAttr.value, &InstrumentTime, 255, &UA_TYPES[UA_TYPES_STRING]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10101),
+						r2_airgard_timestamp_Id,
+						UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        	UA_QUALIFIEDNAME(1, "Instrument Time"),
+						UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+						vInstrumentTimeAttr, NULL, NULL);
+
+                        //UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+                        //        "Attribute Variable created: Airgard->TimestampType->Instrument Time\n", r2_airgard_timestamp_Id);
+			// variable
+                        UA_VariableAttributes vMeasurementTimeAttr = UA_VariableAttributes_default;
+			vMeasurementTimeAttr.description = UA_LOCALIZEDTEXT("en-US", "Measurement Time Info");
+			vMeasurementTimeAttr.displayName = UA_LOCALIZEDTEXT("en-US", "2. Measurement Time");
+                        vMeasurementTimeAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                       //UA_String MeasurementTime = (UA_String) XMLMeasurementTime;
+                        UA_String  MeasurementTime[255];
+                        //strcpy(MeasurementTime, XMLMeasurementTime);
+                        UA_Variant_setArray(&vMeasurementTimeAttr.value, &MeasurementTime, 255, &UA_TYPES[UA_TYPES_STRING]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10102),
+                                        	r2_airgard_timestamp_Id,
+						UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        	UA_QUALIFIEDNAME(1, "Measurement Time"),
+						UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+						vMeasurementTimeAttr, NULL, NULL);
+
+                        //UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+                        //        "Attribute Variable created: Airgard->TimestampType->Measurement Time\n", r2_airgard_timestamp_Id);
+
+		//***// Subtree: Airgard->Status (1, 10200)
+
+			// Add objectnode to represent Airgard->Status
+			UA_NodeId r2_airgard_status_Id;
+			UA_ObjectAttributes oAttr_r2_status = UA_ObjectAttributes_default;
+			UA_Server_addObjectNode(server, UA_NODEID_STRING(1, "AirGardSensor_Status"),
+					r1_airgardroot_Id,
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_HASSUBTYPE),
+                                        UA_QUALIFIEDNAME(1, "Status"),
+					UA_NODEID_NUMERIC(0, UA_NS0ID_BASEOBJECTTYPE),
+					oAttr_r2_status, NULL, &r2_airgard_status_Id);
+
+                        //UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+                        //        "Object Node created : Airgard->Status \n", r2_airgard_status_Id);
+
+			// variable
+                        UA_VariableAttributes vSensorAttr = UA_VariableAttributes_default;
+                        vSensorAttr.description = UA_LOCALIZEDTEXT("en-US", "Sensor Info");
+                        vSensorAttr.displayName = UA_LOCALIZEDTEXT("en-US", "1. Sensor");
+                        vSensorAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                        UA_String Sensor[255];
+                        UA_Variant_setArray(&vSensorAttr.value, &Sensor, 255, &UA_TYPES[UA_TYPES_STRING]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10201),
+                                        r2_airgard_status_Id,
+					UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "Sensor"),
+					UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+					vSensorAttr, NULL, NULL);
+
+                        // variable
+                        UA_VariableAttributes vOperatingTimeAttr = UA_VariableAttributes_default;
+                        vOperatingTimeAttr.description = UA_LOCALIZEDTEXT("en-US", "Operating Time Info");
+                        vOperatingTimeAttr.displayName = UA_LOCALIZEDTEXT("en-US", "2. Operating Time");
+                        vOperatingTimeAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                        UA_Int16 OperatingTime;
+                        UA_Variant_setScalar(&vOperatingTimeAttr.value, &OperatingTime, &UA_TYPES[UA_TYPES_INT16]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10202),
+                                        r2_airgard_status_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "Operating Time"),
+					UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+					vOperatingTimeAttr, NULL, NULL);
+
+                        // variable
+                        UA_VariableAttributes vWarningMessageAttr = UA_VariableAttributes_default;
+                        vWarningMessageAttr.description = UA_LOCALIZEDTEXT("en-US", "WarningMessageInfo");
+                        vWarningMessageAttr.displayName = UA_LOCALIZEDTEXT("en-US", "3. Warning Message");
+                        vWarningMessageAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                        UA_String WarningMessage[255];
+                        UA_Variant_setArray(&vWarningMessageAttr.value, &WarningMessage, 255, &UA_TYPES[UA_TYPES_STRING]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10203),
+                                        r2_airgard_status_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "Warning Message"),
+					UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+					vWarningMessageAttr, NULL, NULL);
+
+                        // Add objectnode to represent Airgard->Status->Info
+                        UA_NodeId r3_airgard_status_Info_Id;			// line 1345
+                        UA_ObjectAttributes oAttr_r3_status_Info = UA_ObjectAttributes_default;
+			oAttr_r3_status_Info.description = UA_LOCALIZEDTEXT("en-US", "Info");
+			oAttr_r3_status_Info.displayName = UA_LOCALIZEDTEXT("en-US", "1. Info");
+                        UA_Server_addObjectNode(server, UA_NODEID_STRING(1, "AirGardSensor_Status_Info"),
+              				r2_airgard_status_Id,
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_HASSUBTYPE),
+                                        UA_QUALIFIEDNAME(1, "Info"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEOBJECTTYPE),
+                                        oAttr_r3_status_Info, NULL, &r3_airgard_status_Info_Id);
+
+                        //UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+                        //        "Object Node created : Airgard->Status->Info \n", r3_airgard_status_Info_Id);
+
+                        UA_VariableAttributes vBootStatusAttr = UA_VariableAttributes_default;
+                        vBootStatusAttr.description = UA_LOCALIZEDTEXT("en-US", "BootStatusInfo");
+                        vBootStatusAttr.displayName = UA_LOCALIZEDTEXT("en-US", "1. Boot Status");
+                        vBootStatusAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                       //UA_String BootStatus = (UA_String) XMLBootStatus;
+                        UA_String BootStatus[255];
+                        //strcpy(BootStatus, XMLBootStatus);
+                        UA_Variant_setArray(&vBootStatusAttr.value, &BootStatus, 255, &UA_TYPES[UA_TYPES_STRING]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10211),r3_airgard_status_Info_Id,
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(2, "Boot Status"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+					vBootStatusAttr, NULL, NULL);
+
+                        UA_VariableAttributes vSnapshotStatusAttr = UA_VariableAttributes_default;
+                        vSnapshotStatusAttr.description = UA_LOCALIZEDTEXT("en-US", "SnapshotStatusInfo");
+                        vSnapshotStatusAttr.displayName = UA_LOCALIZEDTEXT("en-US", "2. Snapshot Status");
+                        vSnapshotStatusAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                         //UA_String SnapshotStatus = (UA_String) XMLSnapshotStatus;
+                        UA_String SnapshotStatus[255];
+                        //strcpy(SnapshotStatus, XMLSnapshotStatus);
+                        UA_Variant_setArray(&vSnapshotStatusAttr.value, &SnapshotStatus, 255, &UA_TYPES[UA_TYPES_STRING]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10212), 
+					r3_airgard_status_Info_Id,
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(2, "Snapshot Status"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE), 
+					vSnapshotStatusAttr, NULL, NULL);
+
+                        UA_VariableAttributes vSCPStatusAttr = UA_VariableAttributes_default;
+                        vSCPStatusAttr.description = UA_LOCALIZEDTEXT("en-US", "SCPStatusInfo");
+                        vSCPStatusAttr.displayName = UA_LOCALIZEDTEXT("en-US", "3. SCP Status");
+                        vSCPStatusAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                        //UA_String SCPStatus = (UA_String) XMLSCPStatus;
+                        UA_String SCPStatus[255];
+                        //strcpy(SCPStatus, XMLSCPStatus);
+                        UA_Variant_setArray(&vSCPStatusAttr.value, &SCPStatus, 255, &UA_TYPES[UA_TYPES_STRING]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10213), 
+					r3_airgard_status_Info_Id,
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(2, "SCP Status"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE), 
+					vSCPStatusAttr, NULL, NULL);
+
+                        UA_VariableAttributes vSFTPStatusAttr = UA_VariableAttributes_default;
+                        vSFTPStatusAttr.description = UA_LOCALIZEDTEXT("en-US", "SFTPStatusInfo");
+                        vSFTPStatusAttr.displayName = UA_LOCALIZEDTEXT("en-US", "4. SFTP Status");
+                        vSFTPStatusAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                         //UA_String SFTPStatus = (UA_String) XMLSFTPStatus;
+                        UA_String SFTPStatus[255];
+                        //strcpy(SFTPStatus, XMLSFTPStatus);
+                        UA_Variant_setArray(&vSFTPStatusAttr.value, &SFTPStatus, 255, &UA_TYPES[UA_TYPES_STRING]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10214), 
+					r3_airgard_status_Info_Id,
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(2, "SFTP Status"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE), 
+					vSFTPStatusAttr, NULL, NULL);
+
+                        UA_VariableAttributes vRunScriptStatusAttr = UA_VariableAttributes_default;
+                        vRunScriptStatusAttr.description = UA_LOCALIZEDTEXT("en-US", "RunScriptStatusInfo");
+                        vRunScriptStatusAttr.displayName = UA_LOCALIZEDTEXT("en-US", "5. Run Script Status");
+                        vRunScriptStatusAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                         //UA_String RunScriptStatus = (UA_String) XMLRunScriptStatus;
+                        UA_String RunScriptStatus[255];
+                        //strcpy(RunScriptStatus, XMLRunScriptStatus);
+                        UA_Variant_setArray(&vRunScriptStatusAttr.value, &RunScriptStatus, 255, &UA_TYPES[UA_TYPES_STRING]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10215), 
+					r3_airgard_status_Info_Id,
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(2, "Run Script Status"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE), 
+					vRunScriptStatusAttr, NULL, NULL);
+
+                        UA_VariableAttributes vArchiveStatusAttr = UA_VariableAttributes_default;
+                        vArchiveStatusAttr.description = UA_LOCALIZEDTEXT("en-US", "ArchiveStatusInfo");
+                        vArchiveStatusAttr.displayName = UA_LOCALIZEDTEXT("en-US", "6. Archive Status");
+                        vArchiveStatusAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                        //UA_String ArchiveStatus = (UA_String) XMLArchiveStatus;
+                        UA_String ArchiveStatus[255];
+                        //strcpy(ArchiveStatus, XMLArchiveStatus);
+                        UA_Variant_setArray(&vArchiveStatusAttr.value, &ArchiveStatus, 255, &UA_TYPES[UA_TYPES_STRING]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10216), 
+					r3_airgard_status_Info_Id,
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(2, "Archive Status"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE), 
+					vArchiveStatusAttr, NULL, NULL);
+
+                        UA_VariableAttributes vAncillarySensorStatusAttr = UA_VariableAttributes_default;
+                        vAncillarySensorStatusAttr.description = UA_LOCALIZEDTEXT("en-US", "AncillarySensortatusInfo");
+                        vAncillarySensorStatusAttr.displayName = UA_LOCALIZEDTEXT("en-US", "7. Ancillary Sensor Status");
+                        vAncillarySensorStatusAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                         //UA_String AncillarySensorStatus = (UA_String) XMLAncillarySensorStatus;
+                        UA_String AncillarySensorStatus[255];
+                        //strcpy(AncillarySensorStatus, XMLAncillarySensorStatus);
+                        UA_Variant_setArray(&vAncillarySensorStatusAttr.value, &AncillarySensorStatus, 255, &UA_TYPES[UA_TYPES_STRING]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10217), 
+					r3_airgard_status_Info_Id,
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(2, "Ancillary Sensor Status"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE), 
+					vAncillarySensorStatusAttr, NULL, NULL);
+
+		//***// Subtree: Airgard->Diagnostics (1,10300)
+
+			// Add objectnode to represent Airgard->Diagnostics
+			UA_NodeId r2_airgard_diagnostics_Id;
+                        UA_ObjectAttributes oAttr_r2_diagnostics = UA_ObjectAttributes_default;
+                        UA_Server_addObjectNode(server, UA_NODEID_STRING(1, "AirgardSensor_Diagnostics"),
+						r1_airgardroot_Id,
+                                                UA_NODEID_NUMERIC(0,UA_NS0ID_HASSUBTYPE),
+                                                UA_QUALIFIEDNAME(1, "Diagnostic"),
+						UA_NODEID_NUMERIC(0, UA_NS0ID_BASEOBJECTTYPE),
+						oAttr_r2_diagnostics, NULL, &r2_airgard_diagnostics_Id);
+
+			//UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+			//	"Object Node created : Airgard->Diagnostics Node\n", r2_airgard_diagnostics_Id);
+
+                        // variable
+			UA_NodeId outIgramPP_Id;
+                        UA_VariableAttributes vIgramPPAttr = UA_VariableAttributes_default;
+			vIgramPPAttr.valueRank = -1;							// value is a scalar
+			vIgramPPAttr.description = UA_LOCALIZEDTEXT("en-US", "IgramPPInfo");
+			vIgramPPAttr.displayName = UA_LOCALIZEDTEXT("en-US", "01. Igram PP");
+   			vIgramPPAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_HISTORYREAD;  //UA_NODEATTRIBUTESMASK_HISTORIZING;
+			vIgramPPAttr.historizing = true;
+                        //UA_Float IgramPP = (UA_Float) XMLIgramPP;	// value is set in print_element_names
+                        UA_Variant_setScalar(&vIgramPPAttr.value, &IgramPP, &UA_TYPES[UA_TYPES_FLOAT]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10301),	// 1 refers to namespace : NS1
+					r2_airgard_diagnostics_Id,
+					UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+					UA_QUALIFIEDNAME(1, "Igram PP"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+					vIgramPPAttr, NULL, &outIgramPP_Id);
+
+			//UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+                        //        "Attribute Variable created: Airgard->Diagnostics->IgramPP\n", r2_airgard_diagnostics_Id);
+
+
+                        // variable
+			UA_NodeId outIgramDC_Id;
+                        UA_VariableAttributes vIgramDCAttr = UA_VariableAttributes_default;
+                        vIgramDCAttr.description = UA_LOCALIZEDTEXT("en-US", "IgramDCInfo");
+                        vIgramDCAttr.displayName = UA_LOCALIZEDTEXT("en-US", "02. Igram DC");
+                        vIgramDCAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_HISTORYREAD;  //UA_NODEATTRIBUTESMASK_HISTORIZING 1;
+			vIgramDCAttr.historizing = true;
+                        //UA_Float IgramDC = (UA_Float) XMLIgramDC;	// value is set in print_element_names
+                        UA_Variant_setScalar(&vIgramDCAttr.value, &IgramDC, &UA_TYPES[UA_TYPES_FLOAT]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10302),
+					r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+					UA_QUALIFIEDNAME(1, "Igram DC"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+					vIgramDCAttr, NULL, &outIgramDC_Id);
+
+
+			// variable
+			UA_NodeId outLaserPP_Id;
+                        UA_VariableAttributes vLaserPPAttr = UA_VariableAttributes_default;
+                        vLaserPPAttr.description = UA_LOCALIZEDTEXT("en-US", "LaserPPInfo");
+                        vLaserPPAttr.displayName = UA_LOCALIZEDTEXT("en-US", "03. Laser PP");
+                        vLaserPPAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_HISTORYREAD;  //UA_NODEATTRIBUTESMASK_HISTORIZING 2;
+			vLaserPPAttr.historizing = true;
+                        //UA_Float LaserPP = (UA_Float) XMLLaserPP;     // value is set in print_element_names
+                        UA_Variant_setScalar(&vLaserPPAttr.value, &LaserPP, &UA_TYPES[UA_TYPES_FLOAT]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10303),
+					r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+					UA_QUALIFIEDNAME(1, "Laser PP"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+					vLaserPPAttr, NULL, &outLaserPP_Id);
+
+			// variable
+			UA_NodeId outLaserDC_Id;
+                        UA_VariableAttributes vLaserDCAttr = UA_VariableAttributes_default;
+                        vLaserDCAttr.description = UA_LOCALIZEDTEXT("en-US", "LaserDCInfo");
+                        vLaserDCAttr.displayName = UA_LOCALIZEDTEXT("en-US", "04. Laser DC");
+                        vLaserDCAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_HISTORYREAD;  //UA_NODEATTRIBUTESMASK_HISTORIZING 3;
+			vLaserDCAttr.historizing = true;
+                        //UA_Float LaserDC = (UA_Float) XMLLaserDC; 	// value is set in print_element_names
+                        UA_Variant_setScalar(&vLaserDCAttr.value, &LaserDC, &UA_TYPES[UA_TYPES_FLOAT]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10304),
+					r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+					UA_QUALIFIEDNAME(1, "Laser DC"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+					vLaserDCAttr, NULL, &outLaserDC_Id);
+
+			// variable
+			UA_NodeId outSingleBeamAt900_Id;
+                        UA_VariableAttributes vSingleBeamAt900Attr = UA_VariableAttributes_default;
+                        vSingleBeamAt900Attr.description = UA_LOCALIZEDTEXT("en-US", "SingleBeamAt900");
+                        vSingleBeamAt900Attr.displayName = UA_LOCALIZEDTEXT("en-US", "05. Single Beam At 900");
+                        vSingleBeamAt900Attr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_HISTORYREAD;  //UA_NODEATTRIBUTESMASK_HISTORIZING 4;
+			vSingleBeamAt900Attr.historizing = true;
+                        //UA_Float SingleBeamAt900 = (UA_Float) XMLSingleBeamAt900;	 // value is set in print_element_names
+                        UA_Variant_setScalar(&vSingleBeamAt900Attr.value, &SingleBeamAt900, &UA_TYPES[UA_TYPES_FLOAT]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10305),
+					r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+					UA_QUALIFIEDNAME(1, "Single Beam At 900"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+					vSingleBeamAt900Attr, NULL, &outSingleBeamAt900_Id);
+
+			// variable
+			UA_NodeId outSingleBeamAt2500_Id;
+                        UA_VariableAttributes vSingleBeamAt2500Attr = UA_VariableAttributes_default;
+                        vSingleBeamAt2500Attr.description = UA_LOCALIZEDTEXT("en-US", "SingleBeamAt2500");
+                        vSingleBeamAt2500Attr.displayName = UA_LOCALIZEDTEXT("en-US", "06. Single Beam At 2500");
+                        vSingleBeamAt2500Attr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_HISTORYREAD;  //UA_NODEATTRIBUTESMASK_HISTORIZING 5;
+			vSingleBeamAt2500Attr.historizing = true;
+                        //UA_Float SingleBeamAt2500 = (UA_Float) XMLSingleBeamAt2500;	 // value is set in print_element_names
+                        UA_Variant_setScalar(&vSingleBeamAt2500Attr.value, &SingleBeamAt2500, &UA_TYPES[UA_TYPES_FLOAT]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10306),
+					r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+					UA_QUALIFIEDNAME(1, "Single Beam At 2500"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+					vSingleBeamAt2500Attr, NULL, &outSingleBeamAt2500_Id);
+
+			// variable
+			UA_NodeId outSignalToNoiseAt2500_Id;
+                        UA_VariableAttributes vSignalToNoiseAt2500Attr = UA_VariableAttributes_default;
+                        vSignalToNoiseAt2500Attr.description = UA_LOCALIZEDTEXT("en-US", "SignalToNoiseAt2500");
+                        vSignalToNoiseAt2500Attr.displayName = UA_LOCALIZEDTEXT("en-US", "07. Signal To Noise At 2500");
+                        vSignalToNoiseAt2500Attr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_HISTORYREAD;  //UA_NODEATTRIBUTESMASK_HISTORIZING 6;
+			vSignalToNoiseAt2500Attr.historizing = true;
+                        //UA_Int16 SignalToNoiseRatioAt2500 = (UA_Int16) XMLSignalToNoiseRatioAt2500;
+                        UA_Variant_setScalar(&vSignalToNoiseAt2500Attr.value, &SignalToNoiseAt2500, &UA_TYPES[UA_TYPES_INT16]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10307),
+					r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "Signal To Noise at 2500"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+					vSignalToNoiseAt2500Attr, NULL, &outSignalToNoiseAt2500_Id);
+
+                        // variable
+			UA_NodeId outCenterBurstLocation_Id;
+                        UA_VariableAttributes vCenterBurstLocationAttr = UA_VariableAttributes_default;
+                        vCenterBurstLocationAttr.description = UA_LOCALIZEDTEXT("en-US", "CentreBurstLocation");
+                        vCenterBurstLocationAttr.displayName = UA_LOCALIZEDTEXT("en-US", "08. Centre Burst Location");
+                        vCenterBurstLocationAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_HISTORYREAD;  //UA_NODEATTRIBUTESMASK_HISTORIZING 7;
+			vCenterBurstLocationAttr.historizing = true;
+                        // UA_Float CentreBurstLocation = (UA_Float) XMLCentreBurstLocation;
+                        UA_Variant_setScalar(&vCenterBurstLocationAttr.value, &CenterBurstLocation, &UA_TYPES[UA_TYPES_FLOAT]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10308),
+					r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "Center Burst Location"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+					vCenterBurstLocationAttr, NULL, &outCenterBurstLocation_Id);
+
+                        // variable
+			UA_NodeId outDetectorTemp_Id;
+                        UA_VariableAttributes vDetectorTempAttr = UA_VariableAttributes_default;
+                        vDetectorTempAttr.description = UA_LOCALIZEDTEXT("en-US", "DetectorTemperature");
+                        vDetectorTempAttr.displayName = UA_LOCALIZEDTEXT("en-US", "09. Detector Temperature");
+                        vDetectorTempAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_HISTORYREAD;  //UA_NODEATTRIBUTESMASK_HISTORIZING 8;
+			vDetectorTempAttr.historizing = true;
+                       // UA_Float DetectorTemp = (UA_Float) XMLDetectorTemp;
+                        UA_Variant_setScalar(&vDetectorTempAttr.value, &DetectorTemp, &UA_TYPES[UA_TYPES_FLOAT]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10309),
+					r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "Detector Temperature"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+					vDetectorTempAttr, NULL, &outDetectorTemp_Id);
+
+                        // Add the variable LaserFrequencyValue to server
+			UA_NodeId outLaserFrequency_Id;
+                        UA_VariableAttributes vLaserFrequencyAttr = UA_VariableAttributes_default;
+                        vLaserFrequencyAttr.description = UA_LOCALIZEDTEXT("en-US", "LaserFrequency");
+                        vLaserFrequencyAttr.displayName = UA_LOCALIZEDTEXT("en-US", "10. Laser Frequency");
+                        vLaserFrequencyAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_HISTORYREAD;  //UA_NODEATTRIBUTESMASK_HISTORIZING 9;
+			vLaserFrequencyAttr.historizing = true;
+                        // UA_Float LaserFrequency = (UA_Float) XMLLaserFrequency;
+                        UA_Variant_setScalar(&vLaserFrequencyAttr.value, &LaserFrequency, &UA_TYPES[UA_TYPES_FLOAT]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10310),
+					r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "Laser Frequency"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+					vLaserFrequencyAttr, NULL, &outLaserFrequency_Id);
+
+                        // Add the variable HardDriveSpaceValue to server
+			UA_NodeId outHardDriveSpace_Id;
+                        UA_VariableAttributes vHardDriveSpaceAttr = UA_VariableAttributes_default;
+                        vHardDriveSpaceAttr.description = UA_LOCALIZEDTEXT("en-US", "HardDriveSpace");
+                        vHardDriveSpaceAttr.displayName = UA_LOCALIZEDTEXT("en-US", "11. Hard Drive Space");
+                        vHardDriveSpaceAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_HISTORYREAD;  //UA_NODEATTRIBUTESMASK_HISTORIZING 10;
+			vHardDriveSpaceAttr.historizing = true;
+                         //UA_Int16 HardDriveSpace = (UA_Float) XMLHardDriveSpace;
+                        UA_Variant_setScalar(&vHardDriveSpaceAttr.value, &HardDriveSpace, &UA_TYPES[UA_TYPES_INT16]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10311),
+					r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "Hard Disk Drive Space"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+					vHardDriveSpaceAttr, NULL, &outHardDriveSpace_Id);
+
+                        // Add the variable FlowValue to server
+			UA_NodeId outFlow_Id;
+                        UA_VariableAttributes vFlowAttr = UA_VariableAttributes_default;
+                        vFlowAttr.description = UA_LOCALIZEDTEXT("en-US", "Flow");
+                        vFlowAttr.displayName = UA_LOCALIZEDTEXT("en-US", "12. Flow");
+                        vFlowAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_HISTORYREAD;  //UA_NODEATTRIBUTESMASK_HISTORIZING 11;
+			vFlowAttr.historizing = true;
+                         //UA_Float Flow = (UA_Float) XMLFlow;
+                        UA_Variant_setScalar(&vFlowAttr.value, &Flow, &UA_TYPES[UA_TYPES_FLOAT]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10312),
+					r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "Flow"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+					vFlowAttr, NULL, &outFlow_Id);
+
+                        // Add the variable TemperatureValue to server
+			UA_NodeId outTemperature_Id;
+                        UA_VariableAttributes vTemperatureAttr = UA_VariableAttributes_default;
+                        vTemperatureAttr.description = UA_LOCALIZEDTEXT("en-US", "Temperature");
+                        vTemperatureAttr.displayName = UA_LOCALIZEDTEXT("en-US", "13. Temperature");
+                        vTemperatureAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_HISTORYREAD;  //UA_NODEATTRIBUTESMASK_HISTORIZING 12;
+			vTemperatureAttr.historizing = true;
+                        //UA_Float Temperature = (UA_Float) XMLTemperature;
+                        UA_Variant_setScalar(&vTemperatureAttr.value, &Temperature, &UA_TYPES[UA_TYPES_FLOAT]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10313),
+					r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "Temperature"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+					vTemperatureAttr, NULL, &outTemperature_Id);
+
+                        // Add the variable PressureValue to server
+			UA_NodeId outPressure_Id;
+                        UA_VariableAttributes vPressureAttr = UA_VariableAttributes_default;
+                        vPressureAttr.description = UA_LOCALIZEDTEXT("en-US", "Pressure");
+                        vPressureAttr.displayName = UA_LOCALIZEDTEXT("en-US", "14. Pressure");
+                        vPressureAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_HISTORYREAD;  //UA_NODEATTRIBUTESMASK_HISTORIZING 13;
+			vPressureAttr.historizing = true;
+                        //UA_Float Pressure = (UA_Float) XMLPressure;
+                        UA_Variant_setScalar(&vPressureAttr.value, &Pressure, &UA_TYPES[UA_TYPES_FLOAT]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10314),
+					r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "Pressure"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+					vPressureAttr, NULL, &outPressure_Id);
+
+                        // Add the variable TempOpticsValue to server
+			UA_NodeId outTempOptics_Id;
+                        UA_VariableAttributes vTempOpticsAttr = UA_VariableAttributes_default;
+                        vTempOpticsAttr.description = UA_LOCALIZEDTEXT("en-US", "TempOptics");
+                        vTempOpticsAttr.displayName = UA_LOCALIZEDTEXT("en-US", "15. Temp Optics");
+                        vTempOpticsAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_HISTORYREAD;  //UA_NODEATTRIBUTESMASK_HISTORIZING 14;
+			vTempOpticsAttr.historizing = true;
+                        //UA_Float Pressure = (UA_Float) XMLPressure;
+                        UA_Variant_setScalar(&vTempOpticsAttr.value, &TempOptics, &UA_TYPES[UA_TYPES_FLOAT]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10315),
+                                        r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "Temp Optics"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                        vTempOpticsAttr, NULL, &outTempOptics_Id);
+
+                        // Add the variable BadScanCounterValue to server
+			UA_NodeId outBadScanCounter_Id;
+                        UA_VariableAttributes vBadScanCounterAttr = UA_VariableAttributes_default;
+                        vBadScanCounterAttr.description = UA_LOCALIZEDTEXT("en-US", "BadScanCounter");
+                        vBadScanCounterAttr.displayName = UA_LOCALIZEDTEXT("en-US", "16. Bad Scan Counter");
+                        vBadScanCounterAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_HISTORYREAD;  //UA_NODEATTRIBUTESMASK_HISTORIZING 15;
+			vBadScanCounterAttr.historizing = true;
+                        //UA_Float Pressure = (UA_Float) XMLPressure;
+                        UA_Variant_setScalar(&vBadScanCounterAttr.value, &BadScanCounter, &UA_TYPES[UA_TYPES_INT16]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10316),
+                                        r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "Bad Scan Counter"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                        vBadScanCounterAttr, NULL, &outBadScanCounter_Id);
+
+                        // Add the variable FreeMemorySpaceValue to server
+			UA_NodeId outFreeMemorySpace_Id;
+                        UA_VariableAttributes vFreeMemorySpaceAttr = UA_VariableAttributes_default;
+                        vFreeMemorySpaceAttr.description = UA_LOCALIZEDTEXT("en-US", "FreeMemorySpace");
+                        vFreeMemorySpaceAttr.displayName = UA_LOCALIZEDTEXT("en-US", "17. Free Memory Space");
+                        vFreeMemorySpaceAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_HISTORYREAD;  //UA_NODEATTRIBUTESMASK_HISTORIZING 16;
+			vFreeMemorySpaceAttr.historizing = true;
+                        //UA_Float Pressure = (UA_Float) XMLPressure;
+                        UA_Variant_setScalar(&vPressureAttr.value, &Pressure, &UA_TYPES[UA_TYPES_FLOAT]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10317),
+                                        r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "Free Memory Space"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                        vFreeMemorySpaceAttr, NULL, &outFreeMemorySpace_Id);
+
+                       // Add the variable LABFilenameValue to server
+                        UA_VariableAttributes vLABFilenameAttr = UA_VariableAttributes_default;
+                        vLABFilenameAttr.description = UA_LOCALIZEDTEXT("en-US", "LABFilename");
+                        vLABFilenameAttr.displayName = UA_LOCALIZEDTEXT("en-US", "18. LAB Filename");
+                        vLABFilenameAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                        //UA_Float Pressure = (UA_Float) XMLPressure;
+                        UA_Variant_setScalar(&vLABFilenameAttr.value, &LABFilename, &UA_TYPES[UA_TYPES_STRING]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10318),
+                                        r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "LAB Filename"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                        vLABFilenameAttr, NULL, NULL);
+
+                       // Add the variable LOGFilenameValue to server
+                        UA_VariableAttributes vLOGFilenameAttr = UA_VariableAttributes_default;
+                        vLOGFilenameAttr.description = UA_LOCALIZEDTEXT("en-US", "LOGFilename");
+                        vLOGFilenameAttr.displayName = UA_LOCALIZEDTEXT("en-US", "19. LOG Filename");
+                        vLOGFilenameAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                        //UA_Float Pressure = (UA_Float) XMLPressure;
+                        UA_Variant_setScalar(&vLOGFilenameAttr.value, &LOGFilename, &UA_TYPES[UA_TYPES_STRING]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10319),
+                                        r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "LOG Filename"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                        vLOGFilenameAttr, NULL, NULL);
+
+                        // Add the variable LgFilenameValue to server
+                        UA_VariableAttributes vLgFilenameAttr = UA_VariableAttributes_default;
+                        vLgFilenameAttr.description = UA_LOCALIZEDTEXT("en-US", "LgFilename");
+                        vLgFilenameAttr.displayName = UA_LOCALIZEDTEXT("en-US", "20. Lg Filename");
+                        vLgFilenameAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                        //UA_Float Pressure = (UA_Float) XMLPressure;
+                        UA_Variant_setScalar(&vLgFilenameAttr.value, &LgFilename, &UA_TYPES[UA_TYPES_STRING]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10320),
+                                        r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "Lg Filename"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                        vLgFilenameAttr, NULL, NULL);
+
+                        // Add the variable SecondLgFilenameValue to server
+                        UA_VariableAttributes vSecondLgFilenameAttr = UA_VariableAttributes_default;
+                        vSecondLgFilenameAttr.description = UA_LOCALIZEDTEXT("en-US", "SecondLgFilename");
+                        vSecondLgFilenameAttr.displayName = UA_LOCALIZEDTEXT("en-US", "20. Second Lg Filename");
+                        vSecondLgFilenameAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                        //UA_Float Pressure = (UA_Float) XMLPressure;
+                        UA_Variant_setScalar(&vSecondLgFilenameAttr.value, &SecondLgFilename, &UA_TYPES[UA_TYPES_STRING]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10321),
+                                        r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "Second Lg Filename"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                        vSecondLgFilenameAttr, NULL, NULL);
+
+                        // Add the variable SystemCounterValue to server
+			UA_NodeId outSystemCounter_Id;
+                        UA_VariableAttributes vSystemCounterAttr = UA_VariableAttributes_default;
+                        vSystemCounterAttr.description = UA_LOCALIZEDTEXT("en-US", "SystemCounter");
+                        vSystemCounterAttr.displayName = UA_LOCALIZEDTEXT("en-US", "21. System Counter");
+                        vSystemCounterAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_HISTORYREAD;  //UA_NODEATTRIBUTESMASK_HISTORIZING 17;
+			vSystemCounterAttr.historizing = true;
+                        //UA_Float Pressure = (UA_Float) XMLPressure;
+                        UA_Variant_setScalar(&vSystemCounterAttr.value, &SystemCounter, &UA_TYPES[UA_TYPES_FLOAT]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10322),
+                                        r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "System Counter"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                        vSystemCounterAttr, NULL, &outSystemCounter_Id);
+
+                        // Add the variable DetectorCounterValue to server
+			UA_NodeId outDetectorCounter_Id;
+                        UA_VariableAttributes vDetectorCounterAttr = UA_VariableAttributes_default;
+                        vDetectorCounterAttr.description = UA_LOCALIZEDTEXT("en-US", "DetectorCounter");
+                        vDetectorCounterAttr.displayName = UA_LOCALIZEDTEXT("en-US", "22. Detector Counter");
+                        vDetectorCounterAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_HISTORYREAD;	//UA_NODEATTRIBUTESMASK_HISTORIZING 18;
+			vDetectorCounterAttr.historizing = true;
+                        //UA_Float Pressure = (UA_Float) XMLPressure;
+                        UA_Variant_setScalar(&vDetectorCounterAttr.value, &DetectorCounter, &UA_TYPES[UA_TYPES_FLOAT]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10323),
+                                        r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "Detector Counter"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                        vDetectorCounterAttr, NULL, &outDetectorCounter_Id);
+
+                        // Add the variable LaserCounterValue to server
+			UA_NodeId outLaserCounter_Id;
+                        UA_VariableAttributes vLaserCounterAttr = UA_VariableAttributes_default;
+                        vLaserCounterAttr.description = UA_LOCALIZEDTEXT("en-US", "LaserCounter");
+                        vLaserCounterAttr.displayName = UA_LOCALIZEDTEXT("en-US", "23. Laser Counter");
+                        vLaserCounterAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_HISTORYREAD;  // UA_NODEATTRIBUTESMASK_HISTORIZING 19;
+			vLaserCounterAttr.historizing = true;
+                        //UA_Float Pressure = (UA_Float) XMLPressure;
+                        UA_Variant_setScalar(&vLaserCounterAttr.value, &LaserCounter, &UA_TYPES[UA_TYPES_FLOAT]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10324),
+                                        r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "Laser Counter"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                        vLaserCounterAttr, NULL, &outLaserCounter_Id);
+
+                        // Add the variable FlowPumpCounterValue to server
+			UA_NodeId outFlowPumpCounter_Id;
+                        UA_VariableAttributes vFlowPumpCounterAttr = UA_VariableAttributes_default;
+                        vFlowPumpCounterAttr.description = UA_LOCALIZEDTEXT("en-US", "FlowPumpCounter");
+                        vFlowPumpCounterAttr.displayName = UA_LOCALIZEDTEXT("en-US", "24. Flow Pump Counter");
+                        vFlowPumpCounterAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_HISTORYREAD;  // UA_NODEATTRIBUTESMASK_HISTORIZING 20;
+			vFlowPumpCounterAttr.historizing = true;
+                        //UA_Float Pressure = (UA_Float) XMLPressure;
+                        UA_Variant_setScalar(&vFlowPumpCounterAttr.value, &FlowPumpCounter, &UA_TYPES[UA_TYPES_FLOAT]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10325),
+                                        r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "Flow Pump Counter"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                        vFlowPumpCounterAttr, NULL, &outFlowPumpCounter_Id);
+
+                        // Add the variable DesiccantCounterValue to server
+			UA_NodeId outDesiccantCounter_Id;
+                        UA_VariableAttributes vDesiccantCounterAttr = UA_VariableAttributes_default;
+                        vDesiccantCounterAttr.description = UA_LOCALIZEDTEXT("en-US", "DesiccantCounter");
+                        vDesiccantCounterAttr.displayName = UA_LOCALIZEDTEXT("en-US", "25. Desiccant Counter");
+                        vDesiccantCounterAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_HISTORYREAD;  // UA_NODEATTRIBUTESMASK_HISTORIZING 21;
+			vDesiccantCounterAttr.historizing = true;
+                        //UA_Float Pressure = (UA_Float) XMLPressure;
+                        UA_Variant_setScalar(&vDesiccantCounterAttr.value, &DesiccantCounter, &UA_TYPES[UA_TYPES_FLOAT]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10326),
+                                        r2_airgard_diagnostics_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "Desiccant Counter"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                        vDesiccantCounterAttr, NULL, &outDesiccantCounter_Id);
+
+		// End Subtree: Diagnostics
+
+		// Subtree: Data
+
+                //***// Subtree: Airgard->Data (1,10400)
+
+                        // Add objectnode to represent Airgard->Data
+                        //UA_NodeId r2_airgard_data_Id;   //:: line 1866 ::  shift the definition to the front of the function()
+                        UA_ObjectAttributes oAttr_r2_data = UA_ObjectAttributes_default;
+                        UA_Server_addObjectNode(server, UA_NODEID_STRING(1, "AirgardSensor_Data"),
+                                                r1_airgardroot_Id,
+                                                UA_NODEID_NUMERIC(0,UA_NS0ID_HASSUBTYPE),
+                                                UA_QUALIFIEDNAME(1, "Data"),
+                                                UA_NODEID_NUMERIC(0, UA_NS0ID_BASEOBJECTTYPE),
+                                                oAttr_r2_data, NULL, &r2_airgard_data_Id);
+
+                        //UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+                        //        "Object Node created : Airgard->Data Node\n", r2_airgard_data_Id);
+
+			printf("In line 1868 : r2_airgard_data_Id = %d\n", r2_airgard_data_Id);
+                        // variable
+                        UA_VariableAttributes vAlarmsAttr = UA_VariableAttributes_default;
+                        vAlarmsAttr.description = UA_LOCALIZEDTEXT("en-US", "AlarmsInfo");
+                        vAlarmsAttr.displayName = UA_LOCALIZEDTEXT("en-US", "1. Alarms");
+                        vAlarmsAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+                        //UA_Int16 NoOfwAlarms;
+                        UA_Variant_setScalar(&vAlarmsAttr.value, &NoOfAlarms, &UA_TYPES[UA_TYPES_INT16]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10401),
+					r2_airgard_data_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "1. Alarms"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+					vAlarmsAttr, NULL, NULL);
+
+                        // variable
+                        UA_VariableAttributes vNonAlarmsAttr = UA_VariableAttributes_default;
+                        vNonAlarmsAttr.description = UA_LOCALIZEDTEXT("en-US", "NonAlarmsInfo");
+                        vNonAlarmsAttr.displayName = UA_LOCALIZEDTEXT("en-US", "2. Non Alarms");
+                        vNonAlarmsAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
+			//UA_Int16 NoOfNonAlarms;
+                        UA_Variant_setScalar(&vNonAlarmsAttr.value, &NoOfNonAlarms, &UA_TYPES[UA_TYPES_INT16]);
+                        UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1, 10402),
+					r2_airgard_data_Id,UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
+                                        UA_QUALIFIEDNAME(1, "2. Non Alarms"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+					vNonAlarmsAttr, NULL, NULL);
+
+			// <(OT) Alarm> sub nodes are created dynamically in extract_element_names()
+			// TBD :Non Alarm sub nodes are created dynamically in extract_element_names()
+
+		//--
+		        // Add objectnode to represent Airgard->Methods
+                        UA_NodeId r2_airgard_method_Id;  /* get the nodeid assigned by the server */
+                        UA_ObjectAttributes oAttr_r2_method = UA_ObjectAttributes_default;
+                        UA_Server_addObjectNode(server, UA_NODEID_STRING(1, "AirGardSensor_Method"),
+                                        r1_airgardroot_Id,
+					UA_NODEID_NUMERIC(0, UA_NS0ID_HASSUBTYPE),                     // Make Airgard node <Contains> Method node
+                                        UA_QUALIFIEDNAME(1, "Methods"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEOBJECTTYPE),
+                                        oAttr_r2_method, NULL, &r2_airgard_method_Id);
+
+                        //UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+                        //       "Object Node created : Airgard->Methods Node\n", r2_airgard_method_Id);
+
+			MethodCallInit(server, r2_airgard_method_Id);
+//---------------------MonitoredItemsInit(server);
+
+                        // List of commands supported by Airgard
+                        //addClearAlarmLEDMethod(server, r2_airgard_method_Id);
+
+			// Historizing
+			size_t initialNodeIdStoreSize = 1;
+			/*
+			UA_HistoryDataGathering HistoryDataGathering = UA_HistoryDataGathering_Default(initialNodeIdStoreSize);	// initial NodeStore Size = 1
+			UA_ServerConfig *config = UA_Server_getConfig(server);
+			//config->historyDatabase = UA_HistoryDatabase_default(HistoryDataGathering);
+			//  need to resolve header issues
+			UA_HistorizingNodeIdSettings HistorizingSetting;
+			HistorizingSetting.historizingBackend = UA_HistoryDataBackend_Memory(21, 20); // 21 nodes, 20 values
+			HistorizingSetting.maxHistoryDataResponseSize = 20;
+			HistorizingSetting.historizingUpdateStrategy = UA_HISTORIZINGUPDATESTRATEGY_VALUESET;
+
+			int retval;
+                        retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outIgramPP_Id, HistorizingSetting);
+                        retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outIgramDC_Id, HistorizingSetting);
+                        retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outLaserPP_Id, HistorizingSetting);
+                        retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outLaserDC_Id, HistorizingSetting);
+                        retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outSingleBeamAt900_Id, HistorizingSetting);
+                        retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outSingleBeamAt2500_Id, HistorizingSetting);
+                        retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outSignalToNoiseAt2500_Id, HistorizingSetting);
+                        retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outCenterBurstLocation_Id, HistorizingSetting);
+                        retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outDetectorTemp_Id, HistorizingSetting);
+                        retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outLaserFrequency_Id, HistorizingSetting);
+                        retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outHardDriveSpace_Id, HistorizingSetting);
+                        retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outFlow_Id, HistorizingSetting);
+                        retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outTemperature_Id, HistorizingSetting);
+                        retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outPressure_Id, HistorizingSetting);
+                        retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outTempOptics_Id, HistorizingSetting);
+                        retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outBadScanCounter_Id, HistorizingSetting);
+                        retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outFreeMemorySpace_Id, HistorizingSetting);
+                        retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outSystemCounter_Id, HistorizingSetting);
+                        retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outDetectorCounter_Id, HistorizingSetting);
+                        retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outLaserCounter_Id, HistorizingSetting);
+                        retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outFlowPumpCounter_Id, HistorizingSetting);
+			retval = HistoryDataGathering.registerNodeId(server, HistoryDataGathering.context, &outDesiccantCounter_Id, HistorizingSetting);
+			*/
+
+
+	} // end if
+
+	while (1)
+	{
+		xmlTextReaderPtr xml_TextReaderPtr, xmlPostPtr;
+		xmlDocPtr myxmlDocPtr;
+		xmlNodePtr myxmlNodePtr;
+
+		xmlDoc *myxmlDoc=NULL;
+		xmlNode *root_element=NULL;
+
+		char ConvertToXmlBuffer[MAX_BUFFER_SIZE];
+		int NoOfAttributes;
+		int firstTime=0;
+
+		xmlChar *MeasurementTime;
+
+        	if ((numbytes=recv(sockfd, buffer, MAX_BUFFER_SIZE, 0)) == -1)
+        	{
+                	perror("recv");
+                	exit(-1);
+        	}
+        	buffer[numbytes] = '\0';
+
+		// step 0 : Add XML header
+		sprintf(ConvertToXmlBuffer, "%s\n%s\n\n",
+				"<?xml version=\"1.0\" standalone=\"no\"?>",
+				"<!DOCTYPE AirGard SYSTEM \"AirGardSubjects.dtd\">");
+		strcat(ConvertToXmlBuffer, buffer);
+
+		if (firstTime==0)
+		{
+        		firstTime=1;
+			printf("Received in pid=%d, stream=\n\n%s\n\n", getpid(), ConvertToXmlBuffer);
+		}
+		else
+		printf("Iterations number : %d\n", ++counter);
+
+
+//---------------------------
+		//Documentation can be found at http://www.xmlsoft.org/html/libxml-xmlreader.html#xmlReaderForMemory
+
+		// initialisation function for the XML Parser.  Call once befre processing in case of use in multi-threaded program
+		xmlInitParser();
+		// initialisation function for the Parser Context
+		xmlParserCtxtPtr myxmlParserCtxtPtr;
+		if (xmlInitParserCtxt(myxmlParserCtxtPtr) == -1)
+		{
+			printf("Error : xmlInitParserCtxt\n");
+			 //exit(-1);
+		}
+		else printf("successfully initialise xmlParserCtxtPtr \n");
+
+		// create a parse context for an XML in-memory document
+		myxmlParserCtxtPtr = xmlCreateDocParserCtxt(ConvertToXmlBuffer);
+		if (myxmlParserCtxtPtr == NULL)
+		{
+			printf("Error : xmlCreateDocParseCtxt\n");
+			// exit(-1);
+		}
+		else printf("successfully parse the context (AirGardSubjects.dtd)\n");
+
+	// step 0 : parse an XML in-memory document build a tree.  This reuses the existing @ctxt parse context
+		xmlDocPtr myxmlCtxtReadMemory = xmlCtxtReadMemory(myxmlParserCtxtPtr,
+								ConvertToXmlBuffer,
+								sizeof(ConvertToXmlBuffer),
+								NULL,
+								NULL,
+								XML_PARSE_DTDVALID);
+		if (myxmlCtxtReadMemory == NULL)
+		{
+			printf("Error : xmlCtxtReadMemory\n");
+			// exit(-1);
+		}
+		else printf("Success : xmlCtxtReadMemory\n");
+
+        /* alternate step 0 : parse an XML in-memory document and build a tree.  This reuses the existing @ctxt parser context
+                xmlDocPtr myxmlCtxtReadDoc = xmlCtxtReadDoc(myxmlParserCtxtPtr,
+                                                                ConvertToXmlBuffer,
+                                                                NULL,
+                                                                NULL,
+                                                                XML_PARSE_DTDVALID);
+                if (myxmlCtxtReadDoc == NULL)
+                {
+                        printf("Error : xmlCtxtReadDoc\n");
+                        // exit(-1);
+                }
+                else printf("Success : xmlCtxtReadDoc\n"); */
+
+	// step 1 : create xmlReaderPtr
+		// xmlReaderForMemory :
+		xml_TextReaderPtr = xmlReaderForMemory(ConvertToXmlBuffer, sizeof(ConvertToXmlBuffer), NULL, NULL,XML_PARSE_DTDVALID);
+		if (xml_TextReaderPtr == NULL)
+		{
+			printf("Step 0: Fail at xmlReaderForMemory\n");
+			// exit(-1);
+		}
+		else printf("Success : xmlReaderForMemory\n");
+
+	/* alternate step 1 : create xmlDocPtr
+		// xmlReadDoc : Parse an XML in-memory document and build a tree
+		myxmlDocPtr = xmlReadDoc(ConvertToXmlBuffer, NULL, NULL,XML_PARSE_DTDVALID);
+		if (myxmlDocPtr == NULL)
+		{
+			printf("Error : xmlReadDoc\n");
+			// exit(-1);
+		}
+		else printf("Success : xmlReadDoc\n"); */
+
+	// step 2 :
+		// xmlParseMemory : parse an XML in-memory block and builds a tree
+		myxmlDocPtr = xmlParseMemory(ConvertToXmlBuffer, sizeof(ConvertToXmlBuffer));
+		if (myxmlDocPtr == NULL)
+                {
+                        printf("Error : xmlParseMemory\n");
+                        // exit(-1);
+                }
+                else printf("Success : xmlParseMemory\n");
+
+	/* alternate step 2:
+		// xmlParseDoc : parse an XML in-memory document and builds a tree
+		myxmlDocPtr  = xmlParseDoc(ConvertToXmlBuffer);
+                if (myxmlDocPtr == NULL)
+                {
+                        printf("Error : xmlParseDoc\n");
+                        // exit(-1);
+                }
+                else printf("Success : xmlParseDoc\n"); */
+	//-- end
+
+		myxmlDoc = myxmlDocPtr;
+		root_element = xmlDocGetRootElement(myxmlDoc);
+		extract_element_names(root_element);
+		xmlFreeDoc(myxmlDoc);
+
+		//int retval = run_UA_Client(server, r2_airgard_);// need to pass all the variables into run_UA_Client to write into UA Address space
+		// r2_airgard_data_Id needs to be declared at the front of this function instead of inside the WHILE loop (with the rest)
+
+		int retval = run_UA_Client(server, g_argv_ip, r2_airgard_data_Id);
+		//sleep(9);
+	}
+
+} // End ConnectToAirgard()
+
+
+int main(int argc, char *argv[])
+{
+        pthread_t OPCthread;
+        pthread_t Airgardthread;
+	int results;
+
+	if (argc != 3)
+	{
+		printf("Usage : ./myNewServer <Sensor IP Address> <Sensor Port Number> \n");
+		//printf("Usage : ./myNewServer <Sensor IP Address> <Sensor COMMAND Port Number> <Sensor DATA Port Number> \n"); - KIV
+		exit (0);
+	}
+
+        UA_Server *server = UA_Server_new();	// UA_Server_new(config)
+	UA_ServerConfig *config = UA_Server_getConfig(server);
+	UA_ServerConfig_setDefault(config);
+
+    	/* Add the PubSubTransportLayer implementation to the server config.
+     	* The PubSubTransportLayer is a factory to create new connections
+     	* on runtime. The UA_PubSubTransportLayer is used for all kinds of
+     	* concrete connections e.g. UDP, MQTT, AMQP...
+     	*/
+/* kiv due to header conflict
+    	config->pubsubTransportLayers = (UA_PubSubTransportLayer *) UA_calloc(2, sizeof(UA_PubSubTransportLayer));
+    	if(!config->pubsubTransportLayers)
+	{
+        	UA_Server_delete(server);
+        	return EXIT_FAILURE;
+    	}
+    	config->pubsubTransportLayers[0] = UA_PubSubTransportLayerUDPMP();
+    	config->pubsubTransportLayersSize++;
+*/
+	/* Create a new ConnectionConfig. The addPubSubConnection function takes the
+     	* config and create a new connection. The Connection identifier is
+     	* copied to the NodeId parameter.*/
+
+/* kiv due to header conflict
+    	UA_PubSubConnectionConfig connectionConfig;
+    	memset(&connectionConfig, 0, sizeof(connectionConfig));
+    	connectionConfig.name = UA_STRING("UDP-UADP Connection 1");
+    	connectionConfig.transportProfileUri = UA_STRING("http://opcfoundation.org/UA-Profile/Transport/pubsub-udp-uadp");
+    	connectionConfig.enabled = UA_TRUE;
+*/
+    	/* The address and interface is part of the standard
+     	* defined UA_NetworkAddressUrlDataType. */
+
+// kiv due to header conflict
+    	//UA_NetworkAddressUrlDataType networkAddressUrl = {UA_STRING_NULL , UA_STRING("opc.udp://224.0.0.22:4840/")};
+    	//UA_Variant_setScalar(&connectionConfig.address, &networkAddressUrl, &UA_TYPES[UA_TYPES_NETWORKADDRESSURLDATATYPE]);
+    	//connectionConfig.publisherId.numeric = UA_UInt32_random();
+
+    	/* Connection options are given as Key/Value Pairs. The available options are
+     	* maybe standard or vendor defined. */
+
+/* kiv due to header conflict
+    	UA_KeyValuePair connectionOptions[3];
+    	connectionOptions[0].key = UA_QUALIFIEDNAME(0, "ttl");
+    	UA_UInt32 ttl = 10;
+    	UA_Variant_setScalar(&connectionOptions[0].value, &ttl, &UA_TYPES[UA_TYPES_UINT32]);
+    	connectionOptions[1].key = UA_QUALIFIEDNAME(0, "loopback");
+    	UA_Boolean loopback = UA_FALSE;
+    	UA_Variant_setScalar(&connectionOptions[1].value, &loopback, &UA_TYPES[UA_TYPES_BOOLEAN]);
+    	connectionOptions[2].key = UA_QUALIFIEDNAME(0, "reuse");
+    	UA_Boolean reuse = UA_TRUE;
+    	UA_Variant_setScalar(&connectionOptions[2].value, &reuse, &UA_TYPES[UA_TYPES_BOOLEAN]);
+    	connectionConfig.connectionProperties = connectionOptions;
+    	connectionConfig.connectionPropertiesSize = 3;
+*/
+    	/* Create a new concrete connection and add the connection
+     	* to the current PubSub configuration. */
+
+/* kiv due to header conflict
+    	UA_NodeId connectionIdentifier;
+    	UA_StatusCode retval = UA_Server_addPubSubConnection(server, &connectionConfig, &connectionIdentifier);
+    	if(retval == UA_STATUSCODE_GOOD)
+	{
+        	UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_SERVER,
+                    "The PubSub Connection was created successfully!");
+    	}
+*/
+
+        g_argc = argc;
+	strcpy(g_argv_ip, argv[1]);	// 192.168.2.88
+	g_argv_port = atoi(argv[2]);
+	//g_argv_cmdport = atoi(argv[2]);	// KIV 10004 for send command/ receive input
+	//g_argv_dataport = atoi(argv[3]);// KIV 20004 for data acquisition
+
+	printf("In main(): g_argc = %d, argv = %s %s %s \n", g_argc, argv[0], argv[1], argv[2]);
+	printf("In main() after processing argv: g_argc = %d, g_argv = %s %s %d\n", g_argc, argv[0], g_argv_ip, g_argv_port);
+
+	//initialStartup : used in run_UA_Client() to determine if need to initialise NoOfNonAlarmsNode = 0 and NoOfAlarmsNode = 0
+	initialStartup = 1; // initialise global variable
+
+        if (results = pthread_create(&OPCthread, NULL, StartOPCUAServer, server))
+		printf("Error creating thread : StartOPCUAServer\n") ;
+	else
+		printf("%d Success : pthread_create StartOPCUAServer\n", results);
+
+/*
+        if (results = pthread_create(&Airgardthread, NULL, ConnectToAirgard, server))
+		printf("Error creating thread : ConnectToAirgard\n") ;
+	else
+		printf("%d Success : pthread_create ConnectToAirgard\n", results);
+*/
+	//pthread_join(OPCthread, NULL);
+	//pthread_join(Airgardthread, NULL);
+
+	pthread_exit(NULL);
+	return 0;
+}

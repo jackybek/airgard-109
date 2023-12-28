@@ -1,0 +1,182 @@
+//gcc -std=c99 -v -I/home/pi/open62541/ -I/home/pi/open62541/plugins/ -I/usr/include/libxml2/   -lpthread -lxml2 -lcrypto -lssl open62541.c PopulateOPCUANodes.c 
+//ExtractXMLElementNames.c CreateOPCUANodes.c StartOPCUAClient.c Misc.c mainOPCUAClient.c -o myNewClient >& error-msg
+
+#include "open62541.h"
+#include <stdio.h>
+#include <string.h>
+
+int main(int argc, char *argv[]);
+UA_NodeId CreateOPCUANodes(void *);
+void PopulateOPCUANodes(char *);
+int StartOPCUAClient(UA_Client *, UA_NodeId);
+UA_ByteString loadFile(char* filename);
+
+
+typedef struct {
+char Tag[255];
+char Name[255];
+float Probability;
+char CASnumber[255];
+int Concentration;
+} AlarmStruct;
+
+
+int g_argc = 0;
+char g_argv_ip[255];	// sensor ip
+int g_argv_port = 0;	// sensor port
+char OPCUAServerIP[255];	// OPCUA Server IP
+
+
+char SoftwareVersion[255];
+char DataBlockVersion[255];
+char InstrumentTime[255];
+char MeasurementTime[255];
+
+char BootStatus[255];
+char SnapshotStatus[255];
+char SCPStatus[255];
+char SFTPStatus[255];
+char RunScriptStatus[255];
+char ArchiveStatus[255];
+char AncillarySensorStatus[255];
+
+char Sensor[255];
+UA_Int16 OperatingTime;
+char WarningMessage[255];
+
+UA_Float IgramPP = (UA_Float) 0.0;
+UA_Float IgramDC = (UA_Float) 0.0;
+UA_Float LaserPP = (UA_Float) 0.0;
+UA_Float LaserDC = (UA_Float) 0.0;
+UA_Float SingleBeamAt900 = (UA_Float) 0.0;
+UA_Float SingleBeamAt2500 = (UA_Float) 0.0;
+UA_Int16 SignalToNoiseAt2500 = (UA_Int16) 0.0;
+UA_Float CenterBurstLocation = (UA_Float) 0.0;
+UA_Float DetectorTemp = (UA_Float) 0.0;
+UA_Float LaserFrequency = (UA_Float) 0.0;
+UA_Int16 HardDriveSpace = (UA_Int16) 0.0;
+UA_Float Flow = (UA_Float) 0.0;
+UA_Float Temperature = (UA_Float) 0.0;
+UA_Float Pressure = (UA_Float) 0.0;
+UA_Float TempOptics = (UA_Float) 0.0;
+UA_Int16 BadScanCounter = (UA_Int16) 0;
+UA_Int16 FreeMemorySpace = (UA_Int16) 0;
+
+char LABFilename[255];
+char LOGFilename[255];
+char LgFilename[255];
+char SecondLgFilename[255];
+
+UA_Float SystemCounter = (UA_Float) 0.0;
+UA_Float DetectorCounter = (UA_Float) 0.0;
+UA_Float LaserCounter = (UA_Float) 0.0;
+UA_Float FlowPumpCounter = (UA_Float) 0.0;
+UA_Float DesiccantCounter = (UA_Float) 0.0;
+
+UA_Int16 Alarms;
+UA_Int16 NonAlarms;
+
+int NoOfAlarmsNode;
+
+char AlarmTag[255];
+char AlarmName[255];
+AlarmStruct arrayOfAlarm[255];
+UA_Float AlarmProbability = (UA_Float) 0.0;
+char AlarmCASnumber[255];
+UA_Int16 AlarmConcentration = (UA_Int16) 0;
+
+int NoOfNonAlarmsNode;
+
+// for pub sub use
+UA_NodeId ds1IgramPPId;
+UA_NodeId ds1IgramDCId;
+UA_NodeId ds1LaserPPId;
+UA_NodeId ds1LaserDCId;
+
+
+int main(int argc, char *argv[])
+{
+        //pthread_t OPCUAClientthread;
+        //pthread_t Airgardthread;
+	int results;
+
+	if (argc != 4)
+	{
+		printf("Usage : ./myNewClient <Sensor IP> <Sensor Port> <OPCUA Server IP>\n");
+		exit (0);
+	}
+
+ //       UA_Server *server = UA_Server_new();	// UA_Server_new(config)
+//	UA_ServerConfig *config = UA_Server_getConfig(server);
+//	UA_ServerConfig_setDefault(config);
+
+    g_argc = argc;
+	strcpy(g_argv_ip, argv[1]);	// 192.168.2.88
+	g_argv_port = atoi(argv[2]);	// 20004
+	sprintf(OPCUAServerIP, "opc.tcp://%s:4840", argv[3]); //opc.tcp://192.168.2.33:4840
+
+	printf("In main(): g_argc = %d, argv = %s %s %s %s \n", g_argc, argv[0], argv[1], argv[2], argv[3]);
+	printf("In main() after processing argv: g_argc = %d, g_argv = %s %s %d %s\n", g_argc, argv[0], g_argv_ip, g_argv_port, OPCUAServerIP);
+
+
+	UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "Starting OPCUA client ...\n");
+
+	/* - test without ssl first
+	UA_ByteString certificate = loadFile("/etc/ssl/certs/cert.pem");
+	UA_ByteString privateKey = loadFile("/usr/local/ssl/private/private-key.pem");
+	size_t trustListSize = 0;
+	trustListSize = 0; // for testing first
+
+	UA_STACKARRAY(UA_ByteString, trustList, trustListSize);
+	for (size_t trustListCount; trustListCount < trustListSize; trustListCount++)
+		trustList[trustListCount] = loadFile("/usr/local/ssl/trustList/trustList.crl");
+
+	UA_ByteString *revocationList = NULL;
+	size_t revocationListSize = 0;
+	*/
+	UA_Client* uaClient = UA_Client_new();
+	UA_ClientConfig *config = UA_Client_getConfig(uaClient);
+	UA_ClientConfig_setDefault(config);
+
+	/*
+	config->securityMode = UA_MESSAGESECURITYMODE_SIGNANDENCRYPT;
+	UA_ClientConfig_setDefaultEncryption(config, certificate, privateKey, trustList, trustListSize, revocationList, revocationListSize);
+	UA_ByteString_clear(&certificate);
+	UA_ByteString_clear(&privateKey);
+	for (size_t deleteCount = 0; deleteCount < trustListSize; deleteCount++)
+		UA_ByteString_clear(&trustList[deleteCount]);
+	*/
+	UA_StatusCode retval = UA_Client_connect(uaClient, OPCUAServerIP); // connects to the OPCUAServer IP
+	//UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+	//		"Attempting to connect to OPCUA Server at %s with certificate & privatekey \n", OPCUAServerIP, retval);
+
+	if (retval != UA_STATUSCODE_GOOD)
+	{
+		UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,"Fail to connect to server : statuscode %d\n", retval);
+		UA_Client_delete(uaClient);
+		return (int)retval;
+	}
+
+    //if (results = pthread_create(&Airgardthread, NULL, CreateAndPopulateNodes, client))
+	//	printf("Error creating thread : ConnectToAirgard\n") ;
+	else
+	{
+		//UA_NodeId r2_airgard_data_Id = CreateAndPopulateNodes(client);
+		UA_NodeId r2_airgard_data_Id = CreateOPCUANodes(uaClient);
+		while (1)
+		{
+			printf ("In while loop : mainOPCUAClient.c \n");
+			printf("Passing in arguments : %s \n", g_argv_ip);
+			PopulateOPCUANodes(g_argv_ip);	// refers to the sensor ip
+			//printf("%d Success : pthread_create ConnectToAirgard\n", results);
+			retval = StartOPCUAClient(uaClient, r2_airgard_data_Id);
+			sleep(9);
+		}
+	}
+
+	//pthread_join(OPCthread, NULL);
+	//pthread_join(Airgardthread, NULL);
+
+	pthread_exit(NULL);
+	return 0;
+}

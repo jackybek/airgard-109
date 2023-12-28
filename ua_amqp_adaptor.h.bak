@@ -1,0 +1,523 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ *
+ * @author Waheed Ejaz (IMD, University of Rostock)
+ *
+ */
+
+#ifndef OPEN62541_UA_AMQP_ADAPTOR_H
+#define OPEN62541_UA_AMQP_ADAPTOR_H
+
+#include "ua_pubsub_amqp.h"
+#include "open62541.h"
+
+
+
+#define AMQP_PAL_HTONS(s) htons(s)
+#define AMQP_PAL_NTOHS(s) ntohs(s)
+
+#define AMQP_PAL_TIME() time(NULL)
+
+typedef time_t amqp_pal_time_t;
+typedef pthread_mutex_t amqp_pal_mutex_t;
+
+#define AMQP_PAL_MUTEX_INIT(mtx_ptr) pthread_mutex_init(mtx_ptr, NULL)
+#define AMQP_PAL_MUTEX_LOCK(mtx_ptr) pthread_mutex_lock(mtx_ptr)
+#define AMQP_PAL_MUTEX_UNLOCK(mtx_ptr) pthread_mutex_unlock(mtx_ptr)
+
+    struct my_amqp_custom_socket_handle {
+        void* client;
+        void* connection;
+        uint16_t timeout;
+    };
+
+    typedef struct my_amqp_custom_socket_handle* amqp_pal_socket_handle;
+
+ssize_t amqp_pal_sendall(amqp_pal_socket_handle fd, const void* buf, size_t len, int flags);
+ssize_t amqp_pal_recvall(amqp_pal_socket_handle fd, void* buf, size_t bufsz, int flags);
+
+
+/**
+ * @brief An enumeration of CONNECT packet flags.
+ * @ingroup packers
+ *
+ * @see <a href="http://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html#_Toc398718030">
+ * MQTT v3.1.1: CONNECT Variable Header.
+ * </a>
+ */
+enum AMQPConnectFlags {
+    AMQP_CONNECT_RESERVED = 1u,
+    AMQP_CONNECT_CLEAN_SESSION = 2u,
+    AMQP_CONNECT_WILL_FLAG = 4u,
+    AMQP_CONNECT_WILL_QOS_0 = (0u & 0x03) << 3,
+    AMQP_CONNECT_WILL_QOS_1 = (1u & 0x03) << 3,
+    AMQP_CONNECT_WILL_QOS_2 = (2u & 0x03) << 3,
+    AMQP_CONNECT_WILL_RETAIN = 32u,
+    AMQP_CONNECT_PASSWORD = 64u,
+    AMQP_CONNECT_USER_NAME = 128u
+};
+
+
+/**
+ * @brief An enumeration of queued message states.
+ * @ingroup details
+ */
+enum AMQPQueuedMessageState {
+    AMQP_QUEUED_UNSENT,
+    AMQP_QUEUED_AWAITING_ACK,
+    AMQP_QUEUED_COMPLETE
+};
+
+ /**
+  * @brief An enumeration of the MQTT control packet types.
+  * @ingroup unpackers
+  *
+  * @see <a href="http://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html#_Toc398718021">
+  * MQTT v3.1.1: MQTT Control Packet Types
+  * </a>
+  */
+  enum AMQPControlPacketType {
+    AMQP_CONTROL_CONNECT=1u,
+    AMQP_CONTROL_CONNACK=2u,
+    AMQP_CONTROL_PUBLISH=3u,
+    AMQP_CONTROL_PUBACK=4u,
+    AMQP_CONTROL_PUBREC=5u,
+    AMQP_CONTROL_PUBREL=6u,
+    AMQP_CONTROL_PUBCOMP=7u,
+    AMQP_CONTROL_SUBSCRIBE=8u,
+    AMQP_CONTROL_SUBACK=9u,
+    AMQP_CONTROL_UNSUBSCRIBE=10u,
+    AMQP_CONTROL_UNSUBACK=11u,
+    AMQP_CONTROL_PINGREQ=12u,
+    AMQP_CONTROL_PINGRESP=13u,
+    AMQP_CONTROL_DISCONNECT=14u
+};
+
+/**
+ * @brief An enumeration of the PUBLISH flags.
+ * @ingroup packers
+ *
+ * @see <a href="http://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html#_Toc398718037">
+ * MQTT v3.1.1: PUBLISH - Publish Message.
+ * </a>
+ */
+enum AMQPPublishFlags {
+    AMQP_PUBLISH_DUP = 8u,
+    AMQP_PUBLISH_QOS_0 = ((0u << 1) & 0x06),
+    AMQP_PUBLISH_QOS_1 = ((1u << 1) & 0x06),
+    AMQP_PUBLISH_QOS_2 = ((2u << 1) & 0x06),
+    AMQP_PUBLISH_QOS_MASK = ((3u << 1) & 0x06),
+    AMQP_PUBLISH_RETAIN = 0x01
+};
+
+
+/**
+ * @brief The protocol identifier for MQTT v3.1.1.
+ * @ingroup packers
+ *
+ * @see <a href="http://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html#_Toc398718030">
+ * MQTT v3.1.1: CONNECT Variable Header.
+ * </a>
+ */
+#define AMQP_PROTOCOL_LEVEL 0x04
+
+/**
+ * @brief A macro used to declare the enum MQTTErrors and associated
+ *        error messages (the members of the num) at the same time.
+ */
+#define __ALL_AMQP_ERRORS(AMQP_ERROR)                    \
+    AMQP_ERROR(AMQP_ERROR_NULLPTR)                       \
+    AMQP_ERROR(AMQP_ERROR_CONTROL_FORBIDDEN_TYPE)        \
+    AMQP_ERROR(AMQP_ERROR_CONTROL_INVALID_FLAGS)         \
+    AMQP_ERROR(AMQP_ERROR_CONTROL_WRONG_TYPE)            \
+    AMQP_ERROR(AMQP_ERROR_CONNECT_CLIENT_ID_REFUSED)     \
+    AMQP_ERROR(AMQP_ERROR_CONNECT_NULL_WILL_MESSAGE)     \
+    AMQP_ERROR(AMQP_ERROR_CONNECT_FORBIDDEN_WILL_QOS)    \
+    AMQP_ERROR(AMQP_ERROR_CONNACK_FORBIDDEN_FLAGS)       \
+    AMQP_ERROR(AMQP_ERROR_CONNACK_FORBIDDEN_CODE)        \
+    AMQP_ERROR(AMQP_ERROR_PUBLISH_FORBIDDEN_QOS)         \
+    AMQP_ERROR(AMQP_ERROR_SUBSCRIBE_TOO_MANY_TOPICS)     \
+    AMQP_ERROR(AMQP_ERROR_MALFORMED_RESPONSE)            \
+    AMQP_ERROR(AMQP_ERROR_UNSUBSCRIBE_TOO_MANY_TOPICS)   \
+    AMQP_ERROR(AMQP_ERROR_RESPONSE_INVALID_CONTROL_TYPE) \
+    AMQP_ERROR(AMQP_ERROR_CONNECT_NOT_CALLED)          \
+    AMQP_ERROR(AMQP_ERROR_SEND_BUFFER_IS_FULL)           \
+    AMQP_ERROR(AMQP_ERROR_SOCKET_ERROR)                  \
+    AMQP_ERROR(AMQP_ERROR_MALFORMED_REQUEST)             \
+    AMQP_ERROR(AMQP_ERROR_RECV_BUFFER_TOO_SMALL)         \
+    AMQP_ERROR(AMQP_ERROR_ACK_OF_UNKNOWN)                \
+    AMQP_ERROR(AMQP_ERROR_NOT_IMPLEMENTED)               \
+    AMQP_ERROR(AMQP_ERROR_CONNECTION_REFUSED)            \
+    AMQP_ERROR(AMQP_ERROR_SUBSCRIBE_FAILED)              \
+    AMQP_ERROR(AMQP_ERROR_CONNECTION_CLOSED)             \
+    AMQP_ERROR(AMQP_ERROR_INITIAL_RECONNECT)             \
+    AMQP_ERROR(AMQP_ERROR_INVALID_REMAINING_LENGTH)      \
+    AMQP_ERROR(AMQP_ERROR_CLEAN_SESSION_IS_REQUIRED)
+
+
+/**
+ * @brief An enumeration of error codes. Error messages can be retrieved by calling \ref mqtt_error_str.
+ * @ingroup api
+ *
+ * @see mqtt_error_str
+ */
+enum AMQPErrors {
+    AMQP_ERROR_UNKNOWN=INT_MIN,
+    __ALL_AMQP_ERRORS(GENERATE_ENUM)
+    AMQP_OK = 1
+};
+
+
+
+/**
+ * @brief A message in a amqp_message_queue.
+ * @ingroup details
+ */
+struct amqp_queued_message {
+    /** @brief A pointer to the start of the message. */
+    uint8_t *start;
+
+    /** @brief The number of bytes in the message. */
+    size_t size;
+
+
+    /** @brief The state of the message. */
+    enum AMQPQueuedMessageState state;
+
+    /**
+     * @brief The time at which the message was sent..
+     *
+     * @note A timeout will only occur if the message is in
+     *       the MQTT_QUEUED_AWAITING_ACK \c state.
+     */
+    amqp_pal_time_t time_sent;
+
+    /**
+     * @brief The control type of the message.
+     */
+    enum AMQPControlPacketType control_type;
+
+    /**
+     * @brief The packet id of the message.
+     *
+     * @note This field is only used if the associate \c control_type has a
+     *       \c packet_id field.
+     */
+    uint16_t packet_id;
+};
+
+
+/**
+ * @brief Returns the mqtt_queued_message at \p index.
+ * @ingroup details
+ *
+ * @param mq_ptr A pointer to the message queue.
+ * @param index The index of the message.
+ *
+ * @returns The mqtt_queued_message at \p index.
+ */
+#define amqp_mq_get(mq_ptr, index) (((struct amqp_queued_message*) ((mq_ptr)->mem_end)) - 1 - index)
+
+/**
+ * @brief Returns the number of messages in the message queue, \p mq_ptr.
+ * @ingroup details
+ */
+#define amqp_mq_length(mq_ptr) (((struct amqp_queued_message*) ((mq_ptr)->mem_end)) - (mq_ptr)->queue_tail)
+
+
+/**
+ * @brief Returns an error message for error code, \p error.
+ * @ingroup api
+ *
+ * @param[in] error the error code.
+ *
+ * @returns The associated error message.
+ */
+const char* amqp_error_str(enum AMQPErrors error);
+
+/**
+ * @brief Function that does the actual sending and receiving of
+ *        traffic from the network.
+ * @ingroup api
+ *
+ * All the other functions in the @ref api simply stage messages for
+ * being sent to the broker. This function does the actual sending of
+ * those messages. Additionally this function receives traffic (responses and
+ * acknowledgements) from the broker and responds to that traffic accordingly.
+ * Lastly this function also calls the \c publish_response_callback when
+ * any \c MQTT_CONTROL_PUBLISH messages are received.
+ *
+ * @pre mqtt_init must have been called.
+ *
+ * @param[in,out] client The MQTT client.
+ *
+ * @attention It is the responsibility of the application programmer to
+ *            call this function periodically. All functions in the @ref api are
+ *            thread-safe so it is perfectly reasonable to have a thread dedicated
+ *            to calling this function every 200 ms or so. MQTT-C can be used in single
+ *            threaded application though by simply calling this functino periodically
+ *            inside your main thread. See @ref simple_publisher.c and @ref simple_subscriber.c
+ *            for examples (specifically the \c client_refresher functions).
+ *
+ * @returns MQTT_OK upon success, an \ref MQTTErrors otherwise.
+ */
+//enum AMQPErrors amqp_sync(struct amqp_client *client);
+
+// added by Jacky
+struct amqp_client {
+    /** @brief The socket connecting to the MQTT broker. */
+    mqtt_pal_socket_handle socketfd;
+
+    /** @brief The LFSR state used to generate packet ID's. */
+    uint16_t pid_lfsr;
+
+    /** @brief The keep-alive time in seconds. */
+    uint16_t keep_alive;
+
+    /**
+     * @brief A counter counting pings that have been sent to keep the connection alive.
+     * @see keep_alive
+     */
+    int number_of_keep_alives;
+
+    /**
+     * @brief The current sent offset.
+    /**
+     * @brief The current sent offset.
+     *
+     * This is used to allow partial send commands.
+     */
+    size_t send_offset;
+
+    /**
+     * @brief The timestamp of the last message sent to the buffer.
+     *
+     * This is used to detect the need for keep-alive pings.
+     *
+     * @see keep_alive
+    */
+    mqtt_pal_time_t time_of_last_send;
+
+    /**
+     * @brief The error state of the client.
+     *
+     * error should be MQTT_OK for the entirety of the connection.
+     *
+     * @note The error state will be MQTT_ERROR_CONNECT_NOT_CALLED until
+     *       you call mqtt_connect.
+     */
+    enum MQTTErrors error;
+
+    /**
+     * @brief The timeout period in seconds.
+     *
+     * If the broker doesn't return an ACK within response_timeout seconds a timeout
+     * will occur and the message will be retransmitted.
+     *
+     * @note The default value is 30 [seconds] but you can change it at any time.
+     */
+    int response_timeout;
+
+    /** @brief A counter counting the number of timeouts that have occurred. */
+    int number_of_timeouts;
+
+    /**
+     * @brief Approximately much time it has typically taken to receive responses from the
+     *        broker.
+     *
+     * @note This is tracked using a exponential-averaging.
+     */
+    double typical_response_time;
+
+    /**
+     * @brief The callback that is called whenever a publish is received from the broker.
+     *
+     * Any topics that you have subscribed to will be returned from the broker as
+     * mqtt_response_publish messages. All the publishes received from the broker will
+     * be passed to this function.
+     *
+     * @note A pointer to publish_response_callback_state is always passed to the callback.
+     *       Use publish_response_callback_state to keep track of any state information you
+     *       need.
+     */
+    void (*publish_response_callback)(void** state, struct mqtt_response_publish *publish);
+
+    /**
+     * @brief A pointer to any publish_response_callback state information you need.
+     *
+     * @note A pointer to this pointer will always be publish_response_callback upon
+     *       receiving a publish message from the broker.
+     */
+    void* publish_response_callback_state;
+
+    /**
+     * @brief A user-specified callback, triggered on each \ref mqtt_sync, allowing
+     *        the user to perform state inspections (and custom socket error detection)
+     *        on the client.
+     *
+     * This callback is triggered on each call to \ref mqtt_sync. If it returns MQTT_OK
+     * then \ref mqtt_sync will continue normally (performing reads and writes). If it
+     * returns an error then \ref mqtt_sync will not call reads and writes.
+     *
+     * This callback can be used to perform custom error detection, namely platform
+     * specific socket error detection, and force the client into an error state.
+     *
+     * This member is always initialized to NULL but it can be manually set at any
+     * time.
+     */
+    enum MQTTErrors (*inspector_callback)(struct mqtt_client*);
+
+    /**
+     * @brief A callback that is called whenever the client is in an error state.
+     *
+     * This callback is responsible for: application level error handling, closing
+     * previous sockets, and reestabilishing the connection to the broker and
+     * session configurations (i.e. subscriptions).
+     */
+    void (*reconnect_callback)(struct mqtt_client*, void**);
+
+    /**
+     * @brief A pointer to some state. A pointer to this member is passed to
+     *        \ref mqtt_client.reconnect_callback.
+     */
+    void* reconnect_state;
+
+    /**
+     * @brief The buffer where ingress data is temporarily stored.
+     */
+    struct {
+        /** @brief The start of the receive buffer's memory. */
+        uint8_t *mem_start;
+
+        /** @brief The size of the receive buffer's memory. */
+        size_t mem_size;
+
+        /** @brief A pointer to the next writtable location in the receive buffer. */
+        uint8_t *curr;
+
+        /** @brief The number of bytes that are still writable at curr. */
+        size_t curr_sz;
+    } recv_buffer;
+
+    /**
+     * @brief A variable passed to support thread-safety.
+     *
+     * A pointer to this variable is passed to \c MQTT_PAL_MUTEX_LOCK, and
+     * \c MQTT_PAL_MUTEX_UNLOCK.
+     */
+    mqtt_pal_mutex_t mutex;
+    /** @brief The sending message queue. */
+    struct mqtt_message_queue mq;
+};
+
+/**
+ * @brief Handles egress client traffic.
+ * @ingroup details
+ *
+ * @param client The AMQP client.
+ *
+ * @returns AMQP_OK upon success, an \ref AMQPErrors otherwise.
+ */
+ssize_t __amqp_send(struct amqp_client *client);
+
+/**
+ * @brief Handles ingress client traffic.
+ * @ingroup details
+ *
+ * @param client The AMQP client.
+ *
+ * @returns AMQP_OK upon success, an \ref AMQPErrors otherwise.
+ */
+ssize_t __amqp_recv(struct amqp_client *client);
+
+// end added by Jacky
+
+/**
+ * @brief Ping the broker.
+ * @ingroup api
+ *
+ * @pre mqtt_connect must have been called.
+ *
+ * @param[in,out] client The MQTT client.
+ *
+ * @returns \c MQTT_OK upon success, an \ref MQTTErrors otherwise.
+ */
+enum AMQPErrors amqp_ping(struct amqp_client *client);
+
+/**
+ * @brief Ping the broker without locking/unlocking the mutex.
+ * @see mqtt_ping
+ */
+enum AMQPErrors __amqp_ping(struct amqp_client *client);
+
+
+/**
+ * @brief UA_AmqpDisconnect
+ * @param ctx pointer to the AMQP context
+ * @return None
+ */
+void UA_AmqpDisconnect(UA_AmqpContext *ctx);
+
+/**
+ * @brief Connect to AMQP 1.0 broker
+ * @param amqpCtx pointer to the AMQP data
+ * @return UA_StatusCode
+ */
+UA_StatusCode UA_AmqpConnect(UA_AmqpContext *amqpCtx, UA_NetworkAddressUrlDataType address);
+
+/**
+ * @brief Sends a data message to queue specified by sender link
+ * @param amqpCtx Pointer to the amqpCtx
+ * @param sender PN_link associated with queue
+ * @param buf message data to be sent
+ * @return UA_STATUSCODE
+ */
+UA_StatusCode publishAmqp(UA_AmqpContext *amqpCtx, UA_String queue,
+                          const UA_ByteString *buf);
+
+/**
+ * @brief Sends out all tx buffer on the socket
+ *        Receive any incoming traffic on the socket
+ *        Handle any pending events
+ * @param amqpCtx pointer AMQP context
+ * @param timeout timeout for listening on the socket
+ */
+UA_StatusCode yieldAmqp(UA_AmqpContext *amqpCtx, UA_UInt16 timeout);
+
+/**
+ * @brief Register a message that was just added to the buffer.
+ * @ingroup details
+ *
+ * @note This function should be called immediately following a call to a packer function
+ *       that returned a positive value. The positive value (number of bytes packed) should
+ *       be passed to this function.
+ *
+ * @param mq The message queue.
+ * @param[in] nbytes The number of bytes that were just packed.
+ *
+ * @note This function will step mqtt_message_queue::curr and update mqtt_message_queue::curr_sz.
+ * @relates mqtt_message_queue
+ *
+ * @returns The newly added struct mqtt_queued_message.
+ */
+struct amqp_queued_message* amqp_mq_register(struct amqp_message_queue *mq, size_t nbytes);
+
+/**
+ * @brief Find a message in the message queue.
+ * @ingroup details
+ *
+ * @param mq The message queue.
+ * @param[in] control_type The control type of the message you want to find.
+ * @param[in] packet_id The packet ID of the message you want to find. Set to \c NULL if you
+ *            don't want to specify a packet ID.
+ *
+ * @relates mqtt_message_queue
+ * @returns The found message. \c NULL if the message was not found.
+ */
+struct amqp_queued_message* amqp_mq_find(struct amqp_message_queue *mq, enum AMQPControlPacketType control_type, uint16_t *packet_id);
+
+
+
+#endif //OPEN62541_UA_AMQP_ADAPTOR_H
+
