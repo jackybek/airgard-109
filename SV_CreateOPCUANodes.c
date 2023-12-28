@@ -1,4 +1,7 @@
 #include "open62541.h"
+#include <open62541/plugin/log_stdout.h>
+#include <open62541/server.h>
+#include <open62541/server_config_default.h>
 #include <stdio.h>
 #include <string.h>
 #include "SV_NewMethod.h"
@@ -7,6 +10,7 @@
 //#include "AG_NewPubSub.h"
 #define MAX_BUFFER_SIZE 20000
 #define MAX_STRING_SIZE 64
+//#define DEBUG
 
 typedef struct {
 char Tag[MAX_STRING_SIZE];
@@ -76,6 +80,7 @@ extern UA_Float DesiccantCounter;
 
 extern UA_Int16 NoOfAlarms;
 extern UA_Int16 NoOfNonAlarms;
+
 
 extern UA_Boolean UA_Nodes_Setup;
 
@@ -277,7 +282,7 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
         //UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "New Namespace added with Nr. %d \n", ns_MKS);
 
         // Add new object called Airgard Sensor
-        UA_NodeId r1_airgardroot_Id;  /* get the nodeid assigned by the server */
+	UA_NodeId r1_airgardroot_Id;  /* get the nodeid assigned by the server */
 	//UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "---UA_NodeId = %d\n", r1_airgardroot_Id);
 
         UA_ObjectAttributes oAttr = UA_ObjectAttributes_default;
@@ -290,10 +295,11 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
 	if (retval != UA_STATUSCODE_GOOD)
            UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                 "Error creating object node : Root Node AirGardSensor : %s", UA_StatusCode_name(retval));
+	#ifdef DEBUG
 	else
             UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                 "Root Node created : Airgard", r1_airgardroot_Id);		// OK
-
+	#endif
     //----------------------------------------------------- Subtree: Airgard->Software Version (1,10000)
 
         // variable
@@ -305,10 +311,13 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
 	vSoftwareVersionAttr.valueRank = UA_VALUERANK_SCALAR;
         vSoftwareVersionAttr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE;
 	vSoftwareVersionAttr.historizing = UA_FALSE;
-        char SoftwareVersion[MAX_STRING_SIZE] = "open62541";
+        UA_String SoftwareVersion = UA_STRING("SoftwareVersion");
 	//if (!UA_Variant_isEmpty(&vSoftwareVersionAttr.value))
-	//        UA_Variant_setScalar(&vSoftwareVersionAttr.value, &SoftwareVersion, &UA_TYPES[UA_TYPES_STRING]);
-       	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10001),		// NodeId
+	        UA_Variant_setScalar(&vSoftwareVersionAttr.value, &SoftwareVersion, &UA_TYPES[UA_TYPES_STRING]);
+       	//else UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        //        "Error UA_Variant_setScalar() : SoftwareVersion 10001");
+	//https://github.com/open62541/open62541(Example Server Implementation); UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10001),		// NodeId
        	    r1_airgardroot_Id,				// parent NodeId
        	    UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),	// parent Reference NodeId
        	    UA_QUALIFIEDNAME(namespaceIndex, "Software Version"),	//UA_QUALIFIEDNAME(1, "Software Version"),	// Qualified Name
@@ -317,10 +326,11 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
        	if (retval != UA_STATUSCODE_GOOD)
        	    UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Error creating node : Software Version 10001: %s", UA_StatusCode_name(retval));
+	#ifdef DEBUG	
 	else
        	    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Attribute Variable created: Airgard->VersionType->SoftwareVersion 10001");	//, r1_airgardroot_Id);
-
+	#endif
 	//=======================================================
 	// add a timestamp - declaration
 	//UA_DateTime currentTime;
@@ -349,8 +359,10 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
 	vDataBlockVersionAttr.historizing = UA_FALSE;
         char DataBlockVersion[MAX_STRING_SIZE];
 	//if (!UA_Variant_isEmpty(&vDataBlockVersionAttr.value))
-	//        UA_Variant_setScalar(&vDataBlockVersionAttr.value, &DataBlockVersion, &UA_TYPES[UA_TYPES_STRING]);
-       	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10002), r1_airgardroot_Id,
+	        UA_Variant_setScalar(&vDataBlockVersionAttr.value, &DataBlockVersion, &UA_TYPES[UA_TYPES_STRING]);
+        //else UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        //        "Error UA_Variant_setScalar() : DataBlockVersion 10002");       	
+	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10002), r1_airgardroot_Id,
        	    UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
        	    UA_QUALIFIEDNAME(namespaceIndex, "2. Data Block Version"),	//UA_QUALIFIEDNAME(1, "2. Data Block Version"),
        	    UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),	//https://github.com/open62541/open62541(Example Server Implementation);UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
@@ -358,12 +370,13 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
        	if (retval != UA_STATUSCODE_GOOD)
        	    UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Error creating node : DataBlockVersion 10002: %s", UA_StatusCode_name(retval));
-       	else
+       	#ifdef DEBUG
+	else
        	    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Attribute Variable created: Airgard->VersionType->DataBlockVersion 10002");	//, r1_airgardroot_Id);
-
+	#endif
+	    
         //***// Subtree: Airgard->Timestamp (1,10100)
-
             // Add objectnode to represent Airgard->Timestamp
         UA_NodeId r2_airgard_timestamp_Id;  /* get the nodeid assigned by the server */
         UA_ObjectAttributes oAttr_r2_timestamp = UA_ObjectAttributes_default;
@@ -376,10 +389,12 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
         if (retval != UA_STATUSCODE_GOOD)
             UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                 "Error creating object node : AirGardSensor_TimeStamp : %s", UA_StatusCode_name(retval));
-        else
+	#ifdef DEBUG
+	else
             UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                 "Object Node created : Airgard->Timestamp Node");	//, r1_airgardroot_Id);
-
+	#endif
+	    
         // variable
         UA_VariableAttributes vInstrumentTimeAttr = UA_VariableAttributes_default;
         vInstrumentTimeAttr.description = UA_LOCALIZEDTEXT("en-US", "Instrument Time Info");
@@ -390,8 +405,10 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
 	vInstrumentTimeAttr.historizing = UA_FALSE;
         char InstrumentTime[MAX_STRING_SIZE];
 	//if (!UA_Variant_isEmpty(&vInstrumentTimeAttr.value))
-	//        UA_Variant_setScalar(&vInstrumentTimeAttr.value, &InstrumentTime, &UA_TYPES[UA_TYPES_STRING]);
-       	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10101),
+	        UA_Variant_setScalar(&vInstrumentTimeAttr.value, &InstrumentTime, &UA_TYPES[UA_TYPES_STRING]);
+        //else UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        //        "Error UA_Variant_setScalar() : InstrumentTime 10101");
+	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10101),
        	    r2_airgard_timestamp_Id,
        	    UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
        	    UA_QUALIFIEDNAME(namespaceIndex, "Instrument Time"), 	//UA_QUALIFIEDNAME(1, "Instrument Time"),
@@ -400,10 +417,12 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
        	if (retval != UA_STATUSCODE_GOOD)
        	    UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Error creating node : Instrument Time 10101: %s", UA_StatusCode_name(retval));
+	#ifdef DEBUG
 	else
             UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Attribute Variable created: Airgard->TimestampType->Instrument Time 10101");	//, r2_airgard_timestamp_Id);
-
+	#endif
+	    
         // variable
         UA_VariableAttributes vMeasurementTimeAttr = UA_VariableAttributes_default;
         vMeasurementTimeAttr.description = UA_LOCALIZEDTEXT("en-US", "Measurement Time Info");
@@ -414,8 +433,10 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
 	vMeasurementTimeAttr.historizing = UA_FALSE;
         char MeasurementTime[MAX_STRING_SIZE];
 	//if (!UA_Variant_isEmpty(&vMeasurementTimeAttr.value))
-	//        UA_Variant_setScalar(&vMeasurementTimeAttr.value, &MeasurementTime, &UA_TYPES[UA_TYPES_STRING]);
-       	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10102),
+	        UA_Variant_setScalar(&vMeasurementTimeAttr.value, &MeasurementTime, &UA_TYPES[UA_TYPES_STRING]);
+        //else UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        //        "Error UA_Variant_setScalar() : MeasurementTime 10102");
+   	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10102),
        	    r2_airgard_timestamp_Id,
        	    UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
        	    UA_QUALIFIEDNAME(namespaceIndex, "Measurement Time"), 	//UA_QUALIFIEDNAME(1, "Measurement Time"),
@@ -424,12 +445,13 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
        	if (retval != UA_STATUSCODE_GOOD)
        	    UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
               	"Error creating node : Measurement Time 10102: %S", UA_StatusCode_name(retval));
-       	else
+	#ifdef DEBUG
+	else
        	    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Attribute Variable created: Airgard->TimestampType->Measurement Time 10102");	//, r2_airgard_timestamp_Id);
-
+	#endif
+	    
         //***// Subtree: Airgard->Status (1, 10200)
-
             // Add objectnode to represent Airgard->Status
         UA_NodeId r2_airgard_status_Id;
         UA_ObjectAttributes oAttr_r2_status = UA_ObjectAttributes_default;
@@ -442,10 +464,12 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
         if (retval != UA_STATUSCODE_GOOD)
             UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                 "Error creating object node : AirGardSensor_Sensor : %s", UA_StatusCode_name(retval));
-        else
+	#ifdef DEBUG
+	else
             UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                 "Object Node created : Airgard->Status");	//, r2_airgard_status_Id);
-
+	#endif
+	    
         // variable
         UA_VariableAttributes vSensorAttr = UA_VariableAttributes_default;
         vSensorAttr.description = UA_LOCALIZEDTEXT("en-US", "Sensor Info");
@@ -456,8 +480,10 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
 	vSensorAttr.historizing = UA_FALSE;
         char Sensor[MAX_STRING_SIZE];
 	//if (!UA_Variant_isEmpty(&vSensorAttr.value))
-	//        UA_Variant_setScalar(&vSensorAttr.value, &Sensor, &UA_TYPES[UA_TYPES_STRING]);
-      	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10201),
+	        UA_Variant_setScalar(&vSensorAttr.value, &Sensor, &UA_TYPES[UA_TYPES_STRING]);
+        //else UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        //        "Error UA_Variant_setScalar() : Sensor 10201");
+	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10201),
        	    r2_airgard_status_Id,
        	    UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
        	    UA_QUALIFIEDNAME(namespaceIndex, "Sensor"),			//UA_QUALIFIEDNAME(1, "Sensor"),
@@ -466,10 +492,12 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
        	if (retval != UA_STATUSCODE_GOOD)
        	    UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Error creating node : Sensor 10201: %s", UA_StatusCode_name(retval));
+	#ifdef DEBUG
 	else
        	    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Attribute Variable created: Airgard->StatusType->Sensor 10201");  //, r2_airgard_timestamp_Id);
-
+	#endif
+	    
         // variable
         UA_VariableAttributes vOperatingTimeAttr = UA_VariableAttributes_default;
         vOperatingTimeAttr.description = UA_LOCALIZEDTEXT("en-US", "Operating Time Info");
@@ -480,8 +508,10 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
 	vOperatingTimeAttr.historizing = UA_FALSE;
         UA_Int16 OperatingTime;
 	//if (!UA_Variant_isEmpty(&vOperatingTimeAttr.value))
- 	//	UA_Variant_setScalar(&vOperatingTimeAttr.value, &OperatingTime, &UA_TYPES[UA_TYPES_INT16]);
-       	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10202),
+ 		UA_Variant_setScalar(&vOperatingTimeAttr.value, &OperatingTime, &UA_TYPES[UA_TYPES_INT16]);
+        //else UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        //        "Error UA_Variant_setScalar() : OperatingTime 10202");
+	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10202),
        	    r2_airgard_status_Id,
   	    UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
        	    UA_QUALIFIEDNAME(namespaceIndex, "Operating Time"),		//UA_QUALIFIEDNAME(1, "Operating Time"),
@@ -490,10 +520,12 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
        	if (retval != UA_STATUSCODE_GOOD)
        	    UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Error creating node : OperatingTime 10202: %s", UA_StatusCode_name(retval));
+	#ifdef DEBUG
 	else
        	    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Attribute Variable created : Airgard->StatusType->OperatingTime 10202");		//, r2_airgard_status_Id);
-
+	#endif
+	    
         // variable
         UA_VariableAttributes vWarningMessageAttr = UA_VariableAttributes_default;
         vWarningMessageAttr.description = UA_LOCALIZEDTEXT("en-US", "WarningMessageInfo");
@@ -504,8 +536,10 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
 	vWarningMessageAttr.historizing = UA_FALSE;
         char WarningMessage[MAX_STRING_SIZE];
 	//if (!UA_Variant_isEmpty(&vWarningMessageAttr.value))
-	//        UA_Variant_setScalar(&vWarningMessageAttr.value, &WarningMessage, &UA_TYPES[UA_TYPES_STRING]);
-       	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10203),
+	        UA_Variant_setScalar(&vWarningMessageAttr.value, &WarningMessage, &UA_TYPES[UA_TYPES_STRING]);
+        //else UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        //        "Error UA_Variant_setScalar() : WarningMessage 10203");
+	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10203),
        	    r2_airgard_status_Id, UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
        	    UA_QUALIFIEDNAME(namespaceIndex, "Warning Message"),	//UA_QUALIFIEDNAME(1, "Warning Message"),
        	    UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
@@ -513,10 +547,12 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
        	if (retval != UA_STATUSCODE_GOOD)
        	    UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Error creating node : Warning Message 10203: %s", UA_StatusCode_name(retval));
+	#ifdef DEBUG
 	else
        	    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Attribute Variable created : Airgard->StatusType->Warning Message 10203");         //, r2_airgard_status_Id);
-
+	#endif
+	    
         // Add objectnode to represent Airgard->Status->Info
         UA_NodeId r3_airgard_status_Info_Id;			// line 1345
         UA_ObjectAttributes oAttr_r3_status_Info = UA_ObjectAttributes_default;
@@ -531,10 +567,12 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
         if (retval != UA_STATUSCODE_GOOD)
             UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                 "Error creating object node : AirGardSensor_Status_Info : %s", UA_StatusCode_name(retval));
-        else
+   	#ifdef DEBUG
+	else
             UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                 "Object Node created : Airgard->Status->Info", r3_airgard_status_Info_Id);
-
+	#endif
+	    
         UA_VariableAttributes vBootStatusAttr = UA_VariableAttributes_default;
         vBootStatusAttr.description = UA_LOCALIZEDTEXT("en-US", "BootStatusInfo");
         vBootStatusAttr.displayName = UA_LOCALIZEDTEXT("en-US", "1. Boot Status");
@@ -544,8 +582,10 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
 	vBootStatusAttr.historizing = UA_FALSE;
         char BootStatus[MAX_STRING_SIZE];
 	//if (!UA_Variant_isEmpty(&vBootStatusAttr.value))
-	//        UA_Variant_setScalar(&vBootStatusAttr.value, &BootStatus, &UA_TYPES[UA_TYPES_STRING]);
-        retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10211),
+	        UA_Variant_setScalar(&vBootStatusAttr.value, &BootStatus, &UA_TYPES[UA_TYPES_STRING]);
+        //else UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        //        "Error UA_Variant_setScalar() : BootStatus 10211");
+	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10211),
    	    r3_airgard_status_Info_Id,
        	    UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
        	    UA_QUALIFIEDNAME(namespaceIndex, "Boot Status"),		//UA_QUALIFIEDNAME(2, "Boot Status"),
@@ -554,10 +594,12 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
        	if (retval != UA_STATUSCODE_GOOD)
        	    UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Error creating node : Boot Status 10211 : %s", UA_StatusCode_name(retval));
-       	else
+	#ifdef DEBUG
+	else
        	    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Attribute Variable created : Airgard->Status->Info->Boot Status 10211");         //, r2_airgard_status_Id);
-
+	#endif
+	    
         UA_VariableAttributes vSnapshotStatusAttr = UA_VariableAttributes_default;
         vSnapshotStatusAttr.description = UA_LOCALIZEDTEXT("en-US", "SnapshotStatusInfo");
         vSnapshotStatusAttr.displayName = UA_LOCALIZEDTEXT("en-US", "2. Snapshot Status");
@@ -567,8 +609,10 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
 	vSnapshotStatusAttr.historizing = UA_FALSE;
         char SnapshotStatus[MAX_STRING_SIZE];
 	//if (!UA_Variant_isEmpty(&vSnapshotStatusAttr.value))
-	//        UA_Variant_setScalar(&vSnapshotStatusAttr.value, &SnapshotStatus, &UA_TYPES[UA_TYPES_STRING]);
-       	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10212),
+	        UA_Variant_setScalar(&vSnapshotStatusAttr.value, &SnapshotStatus, &UA_TYPES[UA_TYPES_STRING]);
+        //else UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        //        "Error UA_Variant_setScalar() : SnapshotStatus 10212");
+	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10212),
        	    r3_airgard_status_Info_Id,
        	    UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
        	    UA_QUALIFIEDNAME(namespaceIndex, "Snapshot Status"),	//UA_QUALIFIEDNAME(2, "Snapshot Status"),
@@ -577,10 +621,12 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
        	if (retval != UA_STATUSCODE_GOOD)
        	    UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Error creating node : Snapshot Status 10212: %s", UA_StatusCode_name(retval));
+	#ifdef DEBUG
 	else
        	    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Attribute Variable created : Airgard->Status->Info->Snapshot Status 10212");         //, r2_airgard_status_Id);
-
+	#endif
+	    
         UA_VariableAttributes vSCPStatusAttr = UA_VariableAttributes_default;
         vSCPStatusAttr.description = UA_LOCALIZEDTEXT("en-US", "SCPStatusInfo");
         vSCPStatusAttr.displayName = UA_LOCALIZEDTEXT("en-US", "3. SCP Status");
@@ -590,8 +636,10 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
 	vSCPStatusAttr.historizing = UA_FALSE;
         char SCPStatus[MAX_STRING_SIZE];
 	//if (!UA_Variant_isEmpty(&vSCPStatusAttr.value))
-        //	UA_Variant_setScalar(&vSCPStatusAttr.value, &SCPStatus, &UA_TYPES[UA_TYPES_STRING]);
-       	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10213),
+        	UA_Variant_setScalar(&vSCPStatusAttr.value, &SCPStatus, &UA_TYPES[UA_TYPES_STRING]);
+       //else UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        //        "Error UA_Variant_setScalar() : SCPStatus 10213");
+	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10213),
        	    r3_airgard_status_Info_Id,
        	    UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
        	    UA_QUALIFIEDNAME(namespaceIndex, "SCP Status"),		//UA_QUALIFIEDNAME(2, "SCP Status"),
@@ -600,10 +648,12 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
        	if (retval != UA_STATUSCODE_GOOD)
        	    UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Error creating node : SCP Status 10213: %s", UA_StatusCode_name(retval));
+	#ifdef DEBUG
 	else
        	    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Attribute Variable created : Airgard->Status->Info->SCP Status 10213");         //, r2_airgard_status_Id);
-
+	#endif
+	    
         UA_VariableAttributes vSFTPStatusAttr = UA_VariableAttributes_default;
         vSFTPStatusAttr.description = UA_LOCALIZEDTEXT("en-US", "SFTPStatusInfo");
         vSFTPStatusAttr.displayName = UA_LOCALIZEDTEXT("en-US", "4. SFTP Status");
@@ -613,8 +663,10 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
 	vSFTPStatusAttr.historizing = UA_FALSE;
         char SFTPStatus[MAX_STRING_SIZE];
 	//if (!UA_Variant_isEmpty(&vSFTPStatusAttr.value))
-        //	UA_Variant_setScalar(&vSFTPStatusAttr.value, &SFTPStatus, &UA_TYPES[UA_TYPES_STRING]);
-       	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10214),
+        	UA_Variant_setScalar(&vSFTPStatusAttr.value, &SFTPStatus, &UA_TYPES[UA_TYPES_STRING]);
+        //else UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        //        "Error UA_Variant_setScalar() : SFTPStatus 10214");
+	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10214),
        	    r3_airgard_status_Info_Id,
        	    UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
        	    UA_QUALIFIEDNAME(namespaceIndex, "SFTP Status"),		//UA_QUALIFIEDNAME(2, "SFTP Status"),
@@ -623,10 +675,12 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
        	if (retval != UA_STATUSCODE_GOOD)
        	    UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Error creating node : SFTP Status 10214: %s", UA_StatusCode_name(retval));
+	#ifdef DEBUG
 	else
        	    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Attribute Variable created : Airgard->Status->Info->SFTP Status 10214");         //, r2_airgard_status_Id);
-
+	#endif
+	    
         UA_VariableAttributes vRunScriptStatusAttr = UA_VariableAttributes_default;
         vRunScriptStatusAttr.description = UA_LOCALIZEDTEXT("en-US", "RunScriptStatusInfo");
         vRunScriptStatusAttr.displayName = UA_LOCALIZEDTEXT("en-US", "5. Run Script Status");
@@ -636,8 +690,10 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
 	vRunScriptStatusAttr.historizing = UA_FALSE;
         char RunScriptStatus[MAX_STRING_SIZE];
 	//if (!UA_Variant_isEmpty(&vRunScriptStatusAttr.value))
-        //	UA_Variant_setScalar(&vRunScriptStatusAttr.value, &RunScriptStatus, &UA_TYPES[UA_TYPES_STRING]);
-        retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10215),
+        	UA_Variant_setScalar(&vRunScriptStatusAttr.value, &RunScriptStatus, &UA_TYPES[UA_TYPES_STRING]);
+        //else UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        //        "Error UA_Variant_setScalar() : RunScriptStatus 10215");
+	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10215),
 	    r3_airgard_status_Info_Id,
  	    UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
             UA_QUALIFIEDNAME(namespaceIndex, "Run Script Status"),	//UA_QUALIFIEDNAME(2, "Run Script Status"),
@@ -646,10 +702,12 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
         if (retval != UA_STATUSCODE_GOOD)
             UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Error creating node : Run Script Status 10215: %s", UA_StatusCode_name(retval));
+	#ifdef DEBUG
 	else
             UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Attribute Variable created : Airgard->Status->Info->Run Script Status 10215");         //, r2_airgard_status_Id);
-
+	#endif
+	    
         UA_VariableAttributes vArchiveStatusAttr = UA_VariableAttributes_default;
         vArchiveStatusAttr.description = UA_LOCALIZEDTEXT("en-US", "ArchiveStatusInfo");
         vArchiveStatusAttr.displayName = UA_LOCALIZEDTEXT("en-US", "6. Archive Status");
@@ -659,8 +717,10 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
 	vArchiveStatusAttr.historizing = UA_FALSE;
         char ArchiveStatus[MAX_STRING_SIZE];
 	//if (!UA_Variant_isEmpty(&vArchiveStatusAttr.value))
-        //	UA_Variant_setScalar(&vArchiveStatusAttr.value, &ArchiveStatus, &UA_TYPES[UA_TYPES_STRING]);
-       	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10216),
+        	UA_Variant_setScalar(&vArchiveStatusAttr.value, &ArchiveStatus, &UA_TYPES[UA_TYPES_STRING]);
+        //else UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        //        "Error UA_Variant_setScalar() : ArchiveStatus 10216");
+	retval = UA_Server_addVariableNode(uaServer, UA_NODEID_NUMERIC(namespaceIndex, 10216),
        	    r3_airgard_status_Info_Id,
        	    UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
        	    UA_QUALIFIEDNAME(namespaceIndex, "Archive Status"),		//UA_QUALIFIEDNAME(2, "Archive Status"),
@@ -669,10 +729,12 @@ UA_NodeId* CreateOPCUANodes(void* x_void_ptr)
        	if (retval != UA_STATUSCODE_GOOD)
        	    UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Error creating node : Archive Status 10216: %s", UA_StatusCode_name(retval));
+	#ifdef DEBUG
 	else
        	    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                	"Attribute Variable created : Airgard->Status->Info->Archive Status 10216");         //, r2_airgard_status_Id);
-
+	#endif
+	    
         UA_VariableAttributes vAncillarySensorStatusAttr = UA_VariableAttributes_default;
         vAncillarySensorStatusAttr.description = UA_LOCALIZEDTEXT("en-US", "AncillarySensortatusInfo");
         vAncillarySensorStatusAttr.displayName = UA_LOCALIZEDTEXT("en-US", "7. Ancillary Sensor Status");
