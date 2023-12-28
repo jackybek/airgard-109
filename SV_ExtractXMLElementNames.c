@@ -1,4 +1,7 @@
-#include "open62541.h"
+//#include "open62541.h"
+#include <open62541/plugin/log_stdout.h>
+#include <open62541/server.h>
+#include <open62541/server_config_default.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -75,8 +78,8 @@ extern UA_Int16 NoOfNonAlarms;
 
 extern int NoOfAlarmsNode;
 extern int NoOfNonAlarmsNode;
-AlarmStruct arrayOfAlarm[255];  //101
-AlarmStruct arrayOfNonAlarm[255];
+extern AlarmStruct arrayOfAlarm[255];  //101
+extern AlarmStruct arrayOfNonAlarm[255];
 extern char AlarmTag[MAX_STRING_SIZE];
 extern char AlarmName[MAX_STRING_SIZE];
 extern UA_Float AlarmProbability;
