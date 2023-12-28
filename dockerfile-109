@@ -122,7 +122,7 @@ RUN cmake \
 WORKDIR /home/debian/open62541/build/
 RUN make
 WORKDIR /home/debian/opcproject/
-RUN git clone --branch main https://jackybek:ILoveSnoopyOscar24@github.com/jackybek/airgardServer-109.git
+RUN git clone --branch main https://jackybek@github.com/jackybek/airgardServer-109.git
 
 VOLUME /data
 
