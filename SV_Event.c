@@ -1,4 +1,7 @@
-#include "open62541.h"
+//#include "open62541.h"
+#include <open62541/plugin/log_stdout.h>
+#include <open62541/server.h>
+#include <open62541/server_config_default.h>
 #define UA_ENABLE_SUBSCRIPTIONS_EVENTS
 
 /**
@@ -237,11 +240,15 @@ addGenerateEvent_ResetMethod(UA_Server *uaServer, UA_NodeId parent)
 
 	if(retval != UA_STATUSCODE_GOOD)
 	{
-		printf("SV_Event: addGenerateEventResetMethod() failure : %d \n", retval);
-		sleep(5);
+		UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "SV_Event:addGenerateEventResetMethod() failure : %s", UA_StatusCode_name(retval) );
+		//printf("SV_Event: addGenerateEventResetMethod() failure : %d \n", retval);
+		//sleep(5);
 	}
 	else
-		printf("SV_Event: addGenerateEventResetMethod() success : %d \n", retval);
+	{
+		UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "SV_Event:addGenerateEventResetMethod() success : %s", UA_StatusCode_name(retval) );
+		//printf("SV_Event: addGenerateEventResetMethod() success : %d \n", retval);
+	}
 }
 
 static void
@@ -267,11 +274,15 @@ addGenerateEvent_ShutdownMethod(UA_Server *uaServer, UA_NodeId parent)
                             0, NULL, 0, NULL, NULL, NULL);
 	if(retval != UA_STATUSCODE_GOOD)
 	{
-        	printf("SV_Event: addGenerateEventShutdownMethod() failure : %d \n", retval);
-		sleep(5);
+		UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "SV_Event: addGenerateEventShutdownMethod() failure : %s", UA_StatusCode_name(retval) );
+        	//printf("SV_Event: addGenerateEventShutdownMethod() failure : %d \n", retval);
+		//sleep(5);
 	}
 	else
-		printf("SV_Event: addGenerateEventShutdownMethod() success : %d \n", retval);
+	{
+		UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "SV_Event: addGenerateEventShutdownMethod() success : %s", UA_StatusCode_name(retval) );
+		//printf("SV_Event: addGenerateEventShutdownMethod() success : %d \n", retval);
+	}
 }
 
 static UA_StatusCode
@@ -281,7 +292,7 @@ addNewEventType(UA_Server *uaServer)
     attr.displayName = UA_LOCALIZEDTEXT("en-US", "SimpleEventType");
     attr.description = UA_LOCALIZEDTEXT("en-US", "The simple event type we created");
 
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "SV_Event.c : addNewEventType() ...\n");
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "SV_Event.c : addNewEventType() ...");
 
     size_t namespaceIndex;
     UA_Server_getNamespaceByName(uaServer, UA_STRING("virtualskies.com.sg/MKS/"), &namespaceIndex);
@@ -292,15 +303,17 @@ addNewEventType(UA_Server *uaServer)
                                        UA_QUALIFIEDNAME(0, "SimpleEventType"),
                                        attr, NULL, &eventType);
 
-    printf("addNewEventType : status = %u \n", status);
+    //printf("addNewEventType : status = %u \n", status);
     return status;
 }
 
 void CreateServerEvents(UA_Server *uaServer, UA_NodeId parent)
 {
+	UA_StatusCode retVal;
 
 	UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "SV_Event.c : CreateServerEvents()");
-	addNewEventType(uaServer);
+	retVal = addNewEventType(uaServer);
+	UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "SV_Event.c : addNewEventType() returns %s", UA_StatusCode_name(retVal));
 
 	// these functions should be called by Methods
 	addGenerateEvent_ResetMethod(uaServer, parent);	//==> this event will be mapped to the Reset Method in OPCUA Server
