@@ -1,4 +1,7 @@
-#include "open62541.h"
+#include <open62541/plugin/log_stdout.h>
+#include <open62541/server.h>
+#include <open62541/server_config_default.h>
+//#include "open62541.h"
 
 #define UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
 
@@ -230,12 +233,12 @@ void afterWriteCallbackVariable_1(UA_Server *uaServer,
             return;
         }
     } else {
-        /* By writing "false" in ActiveState/Id, the A&C server will set only
+        /* By writing "UA_FALSE" in ActiveState/Id, the A&C server will set only
          * the ActiveState field automatically to the value "Inactive". The user
          * should trigger the event manually by calling
          * UA_Server_triggerConditionEvent inside the application or call
          * ConditionRefresh method with client to update the event notification. */
-        UA_Boolean activeStateId = false;
+        UA_Boolean activeStateId = UA_FALSE;
         UA_Variant_setScalar(&value, &activeStateId, &UA_TYPES[UA_TYPES_BOOLEAN]);
         retval = UA_Server_setConditionVariableFieldProperty(uaServer, conditionInstance_1,
                                                              &value, activeStateField,
@@ -293,7 +296,7 @@ void afterWriteCallbackVariable_3(UA_Server *uaServer,
 /*
  * RTN = return to normal
  *
- * <Retain> will be set to false, thus no events will be generated for condition 1
+ * <Retain> will be set to UA_FALSE, thus no events will be generated for condition 1
  * (although EnabledState!=UA_TRUE).  To set <Retain> to UA_TRUE again, the <disable> and
  * <enable> methods should be called respectively
 */
@@ -303,11 +306,11 @@ void afterWriteCallbackVariable_3(UA_Server *uaServer,
 
 	UA_StatusCode retval;
 	UA_Variant value;
-	UA_Boolean idValue = false;
+	UA_Boolean idValue = UA_FALSE;
 	UA_Int16 severityValue = 100;
 	UA_LocalizedText messageValue = UA_LOCALIZEDTEXT("en", "Condition returned to normal state");
 	UA_LocalizedText commentValue = UA_LOCALIZEDTEXT("en", "Normal State");
-	UA_Boolean retainValue = false;
+	UA_Boolean retainValue = UA_FALSE;
 
 
 	// UA_QualifiedName enabledStateField = UA_QUALIFIEDNAME(namespaceIndex, "EnabledState");
@@ -456,7 +459,7 @@ UA_StatusCode enteringAckedStateCallback(UA_Server *uaServer, const UA_NodeId *c
     UA_Server_getNamespaceByName(uaServer, UA_STRING("virtualskies.com.sg/MKS/"), &namespaceIndex);
 
 	// deactivate Alarm when acknowledging
-	UA_Boolean activeStateId = false;
+	UA_Boolean activeStateId = UA_FALSE;
 	UA_Variant value;
 	UA_QualifiedName activeStateField = UA_QUALIFIEDNAME(namespaceIndex, "ActiveState");
 	UA_QualifiedName activeStateIdField = UA_QUALIFIEDNAME(namespaceIndex, "Id");
@@ -478,14 +481,14 @@ UA_StatusCode enteringAckedStateCallback(UA_Server *uaServer, const UA_NodeId *c
 UA_StatusCode enteringConfirmedStateCallback(UA_Server *uaServer, const UA_NodeId *condition)
 {
 /* Deactivate Alarm and put it out of the interesting state (by writing
- * false to <Retain> field) when confirming
+ * UA_FALSE to <Retain> field) when confirming
 */
    size_t namespaceIndex;
 
     UA_Server_getNamespaceByName(uaServer, UA_STRING("virtualskies.com.sg/MKS/"), &namespaceIndex);
 
-	UA_Boolean activeStateId = false;
-	UA_Boolean retain = false;
+	UA_Boolean activeStateId = UA_FALSE;
+	UA_Boolean retain = UA_FALSE;
 	UA_Variant value;
 	UA_QualifiedName activeStateField = UA_QUALIFIEDNAME(namespaceIndex, "ActiveState");
         UA_QualifiedName activeStateIdField = UA_QUALIFIEDNAME(namespaceIndex, "Id");
@@ -546,7 +549,7 @@ UA_StatusCode setUpEnvironment(UA_Server *uaServer)
 
 	userSpecificCallback = enteringEnabledStateCallback;
 	retval = UA_Server_setConditionTwoStateVariableCallback(uaServer, conditionInstance_1,
-						conditionSource, false,
+						conditionSource, UA_FALSE,
 						userSpecificCallback,
 						UA_ENTERING_ENABLEDSTATE);
 	if (retval != UA_STATUSCODE_GOOD)
@@ -560,7 +563,7 @@ UA_StatusCode setUpEnvironment(UA_Server *uaServer)
 
 	userSpecificCallback = enteringAckedStateCallback;
 	retval = UA_Server_setConditionTwoStateVariableCallback(uaServer, conditionInstance_1,
-                                                conditionSource, false,
+                                                conditionSource, UA_FALSE,
                                                 userSpecificCallback,
                                                 UA_ENTERING_ACKEDSTATE);
         if (retval != UA_STATUSCODE_GOOD)
@@ -574,7 +577,7 @@ UA_StatusCode setUpEnvironment(UA_Server *uaServer)
 
         userSpecificCallback = enteringConfirmedStateCallback;
         retval = UA_Server_setConditionTwoStateVariableCallback(uaServer, conditionInstance_1,
-                                                conditionSource, false,
+                                                conditionSource, UA_FALSE,
                                                 userSpecificCallback,
                                                 UA_ENTERING_CONFIRMEDSTATE);
         if (retval != UA_STATUSCODE_GOOD)
@@ -647,7 +650,7 @@ UA_StatusCode setUpEnvironment(UA_Server *uaServer)
 	}
 
 	/* Severity can change internally also when the condition is disabled and
-	 * retain is false. However, in this case no events will be generated
+	 * retain is UA_FALSE. However, in this case no events will be generated
 	*/
 	addVariable_2_changeSeverityOfCondition_2(uaServer, &variable_2);
 	callback.onWrite = afterWriteCallbackVariable_2;
