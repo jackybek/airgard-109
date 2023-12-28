@@ -1,4 +1,9 @@
-#include "open62541.h"
+//#include "open62541.h"
+#include <open62541/client_subscriptions.h>
+#include <open62541/plugin/log_stdout.h>
+#include <open62541/server.h>
+#include <open62541/server_config_default.h>
+
 //#include <mariadb/mysql.h>
 //#include "myNewMonitor.h"
 
@@ -478,7 +483,6 @@ void CreateServerMonitoredItems(UA_Server *server)
         addMonitoredItemToDesiccantCounterVariable(server);	// 40
 
       UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
-        "Completed creation of monitoring nodes\n");
+        "Completed creation of monitoring nodes");
 
 }
-
